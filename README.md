@@ -86,8 +86,8 @@ Edit
 
 # Clone the repo
 
-git clone https://github.com/yourusername/anna-whatsapp-bot.git
-cd anna-whatsapp-bot
+    git clone https://github.com/yourusername/anna-whatsapp-bot.git
+    cd anna-whatsapp-bot
 
 # Set up a virtual environment
 
