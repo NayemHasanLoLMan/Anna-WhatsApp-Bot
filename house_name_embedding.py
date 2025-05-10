@@ -31,7 +31,7 @@ class WordVectorizerGeminiPinecone:
         self.house_name = house_name  # Manually set house name
 
         # Google Gemini setup
-        self.embedding_model = "models/embedding-001"
+        self.embedding_model = "models/text-embedding-004"
         genai.configure(api_key=GOOGLE_API_KEY)
 
         # Pinecone setup
@@ -195,9 +195,9 @@ if __name__ == "__main__":
     # HOUSE_NAME = "Test House"  # Example house name
     
     vectorizer = WordVectorizerGeminiPinecone(
-        file_path="D:\\brindyjean\\House Notes (Internal)\\HN_ Elmerville Hummingbird Crossing.docx",
+        file_path="D:\\brindyjean\\House Notes (Internal)\\HN_ 81st Way Desert Rose.docx",
         pinecone_index_name="house-information-embeddings",
-        house_name="Elmerville Hummingbird Crossing",
+        house_name="81st Way Desert Rose",
     )
     
     # Process the given document

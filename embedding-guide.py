@@ -32,7 +32,7 @@ class WordVectorizerGeminiPinecone:
         self.chunk_size = chunk_size
 
         # Google Gemini setup
-        self.embedding_model = "models/embedding-001"
+        self.embedding_model = "models/text-embedding-004"
         genai.configure(api_key=google_api_key)
 
         # Pinecone setup

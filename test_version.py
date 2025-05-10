@@ -9,11 +9,22 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
 try:
     from rich.console import Console
     from rich.markdown import Markdown
+    from rich.panel import Panel
+    from rich.theme import Theme
     has_rich = True
-    console = Console()
+    # Create a custom theme with colors that match your brand
+    custom_theme = Theme({
+        "user": "bold cyan",
+        "assistant": "bold green",
+        "info": "italic yellow",
+        "warning": "bold red",
+        "reminder": "bold magenta"
+    })
+    console = Console(theme=custom_theme)
 except ImportError:
     has_rich = False
 
@@ -76,20 +87,6 @@ class AlanaAssistant:
             if text:
                 context.append(f"[Source: {source}]\n{text}")
         return "\n\n".join(context) if context else "No relevant information found."
-    
-    def format_conversation_history(self, conversation_history: List[Dict[str, str]]) -> str:
-        """Format conversation history for inclusion in the prompt."""
-        if not conversation_history:
-            return ""
-        
-        formatted_history = []
-        for message in conversation_history:
-            role = message.get('role', '').capitalize()
-            content = message.get('content', '')
-            if role and content:
-                formatted_history.append(f"{role}: {content}")
-        
-        return "\n".join(formatted_history)
     
     def is_reminder_request(self, user_input: str) -> bool:
         """Check if the query is a reminder request."""
@@ -157,14 +154,6 @@ class AlanaAssistant:
             "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12
         }
         
-        # Handle common misspellings like "toay" for "today"
-        if "toay" in text_lower or "today" in text_lower:
-            date_str = "today"
-            natural_date = now.strftime("%Y-%m-%d")
-        elif "tomorrow" in text_lower or "tommorow" in text_lower:
-            date_str = "tomorrow"
-            natural_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
-        
         ordinal_date_pattern = r'(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(' + '|'.join(month_names.keys()) + r')'
         ordinal_match = re.search(ordinal_date_pattern, text_lower)
         if ordinal_match:
@@ -177,6 +166,12 @@ class AlanaAssistant:
             specific_date = datetime(target_year, month_num, day_num)
             date_str = f"on {month_name} {day_num}"
             natural_date = specific_date.strftime("%Y-%m-%d")
+        elif "today" in text_lower or "toay" in text_lower:
+            date_str = "today"
+            natural_date = now.strftime("%Y-%m-%d")
+        elif "tomorrow" in text_lower or "tommorow" in text_lower:
+            date_str = "tomorrow"
+            natural_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
         
         days_of_week = {
             "monday": 0, "mon": 0, "tuesday": 1, "tue": 1, "tues": 1,
@@ -226,58 +221,29 @@ class AlanaAssistant:
         
         return date_str, time_str, natural_date
     
-    def extract_reminder_content(self, text: str, conversation_history=None) -> str:
-        """Extract the actual reminder content from the input, optionally using conversation history for context."""
+    def extract_reminder_content(self, text: str) -> str:
+        """Extract the actual reminder content from the input."""
         content = text
-        
-        # Remove command triggers first
         for keyword in self.reminder_trigger_keywords:
             if content.lower().startswith(keyword.lower()):
                 content = content[len(keyword):].strip()
                 break
-        
-        # Remove time-related phrases - expanded list of patterns
         time_phrases = [
-            r'(?:for|on)\s+(?:today|toay|tomorrow|tommorow)',
-            r'at\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?',
-            r'\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)',
-            r'this\s+(?:morning|afternoon|evening|night)',
-            r'(?:tomorrow|tommorow)(?:\s+morning|\s+afternoon|\s+evening|\s+night)?',
-            r'next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|week)',
+            r'at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?',
+            r'\d{1,2}(?::\d{2})?\s*(?:am|pm)',
+            r'this\s+(?:morning|afternoon|evening)',
+            r'tomorrow(?:\s+morning|\s+afternoon|\s+evening)?',
+            r'next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)',
             r'on\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)',
-            r'(?:remind|reminder|note)\s+(?:me|for|to)',
+            r'next\s+week',
+            r'remind\s+me',
             r'set\s+a\s+reminder',
             r'create\s+a\s+reminder',
             r'make\s+a\s+note'
         ]
-        
-        # Apply each pattern sequentially
         for phrase in time_phrases:
             content = re.sub(phrase, '', content, flags=re.IGNORECASE)
-        
-        # Remove phrases like "for me to" or "for me"
-        content = re.sub(r'for\s+me\s+to', '', content, flags=re.IGNORECASE)
-        content = re.sub(r'for\s+me', '', content, flags=re.IGNORECASE)
-        
-        # Clean up whitespace, including multiple spaces and leading/trailing spaces
         content = re.sub(r'\s+', ' ', content).strip()
-        
-        # Remove any leading conjunctions or prepositions that might be leftover
-        content = re.sub(r'^(?:to|and|that|for|about)\s+', '', content, flags=re.IGNORECASE)
-        
-        # If content is empty or too short, try to extract context from conversation history
-        if not content or len(content) < 3:
-            if conversation_history and len(conversation_history) > 0:
-                # Look for context in the last message from the assistant
-                for message in reversed(conversation_history):
-                    if message.get('role') == 'assistant':
-                        assistant_msg = message.get('content', '')
-                        # Extract the main topic from the assistant's message
-                        key_phrases = re.findall(r'(?:for|about|regarding|on)\s+(.*?)(?:\.|\!|\?|$)', assistant_msg)
-                        if key_phrases:
-                            content = key_phrases[0].strip()
-                            break
-        
         return content if content else "General reminder"
     
     def generate_ai_reminder_message(self, raw_content: str, date_str: str, time_str: str) -> str:
@@ -289,29 +255,25 @@ class AlanaAssistant:
             formatted_time = f"{display_hour}:{minute:02d} {am_pm}"
             
             prompt = f"""
-                Create a brief notification message for the following reminder. 
-                This message WILL BE DELIVERED at the scheduled time, so write it accordingly:
-        
-                
-                Task/Reminder: "{raw_content}"
-                
-                Requirements:
-                1. Create a bold, attention-grabbing title that clearly identifies what the reminder is for (use ** for bold)
-                2. Write the body in future tense (e.g., "Your meeting will begin in 30 minutes")
-                3. Include specific details from the original reminder content
-                4. Keep the message friendly, concise, and actionable
-                5. Format as a short notification (2-3 sentences maximum)
-                6. Include a gentle call-to-action or helpful tip related to the reminder when appropriate
-                7. Write as if this message will appear as a notification at the scheduled time
-                8. Start with the title on its own line, followed by the message body
-                
-                Example format for a meeting reminder:
-                **Team Meeting Reminder**
-                Your scheduled team meeting will begin in 30 minutes. Please have your quarterly report ready to share with the group.
-                
-                Example format for a task reminder:
-                **Property Inspection Due**
-                Time to complete the scheduled inspection for 123 Main Street. Remember to bring the updated checklist and take photos as required.
+            Please format the following reminder content into a professional, well-structured reminder message:
+            
+            Original reminder: "{raw_content}"
+            Time: {formatted_time}
+            Date: {date_str}
+            
+            Requirements:
+            1. Create a bold title that captures the main purpose (use ** for bold)
+            2. Write a concise, professional body with relevant details
+            3. Include an appropriate closing phrase
+            4. Keep the message friendly and professional
+            5. Format as a short, clear paragraph (2-3 sentences maximum)
+            6. Start with the title on its own line, followed by the message body
+            7. Don't explicitly mention this is an "AI-generated" reminder
+            8. Don't include timestamps, references to "original reminder", or meta-information
+            
+            Example format:
+            **Maintenance Appointment**
+            Your maintenance appointment is scheduled as planned. Please have all necessary documents ready. Have a productive day!
             """
             response = self.gemini_model.generate_content(prompt)
             formatted_message = response.text.strip()
@@ -320,63 +282,41 @@ class AlanaAssistant:
             print(f"Error generating AI reminder message: {e}")
             return f"**Reminder**\n{raw_content}"
     
-    def process_reminder(self, user_input: str, conversation_history=None) -> Dict[str, Any]:
+    def process_reminder(self, user_input: str) -> Dict[str, Any]:
         """Process a reminder request and generate response."""
-        # Store original content before any processing
-        original_content = user_input.strip()
-        
-        # Extract time and date information
         date_str, time_str, natural_date = self.parse_reminder_time(user_input)
-        
-        # Extract the reminder content - we'll keep it separate from raw_content
-        reminder_content = self.extract_reminder_content(user_input, conversation_history)
+        raw_content = self.extract_reminder_content(user_input)
+        formatted_message = self.generate_ai_reminder_message(raw_content, date_str, time_str)
         
         hour, minute = map(int, time_str.split(':'))
         reminder_time = f"{hour:02d}:{minute:02d}"
         
-        # Format time for display
-        am_pm = "AM" if hour < 12 else "PM"
-        display_hour = hour % 12 or 12
-        formatted_time = f"{display_hour}:{minute:02d} {am_pm}"
-        
-        # Format date for display
-        reminder_date = datetime.strptime(natural_date, "%Y-%m-%d").date()
-        today = datetime.now().date()
-        date_display = "today" if reminder_date == today else "tomorrow" if reminder_date == today + timedelta(days=1) else reminder_date.strftime("%A, %B %d")
-        
-        # Generate the message
-        formatted_message = self.generate_ai_reminder_message(reminder_content, date_str, time_str)
-        
-        # Create the reminder object with the full original content
         reminder = {
             "send_to": "self",
             "time": reminder_time,
             "date": natural_date,
             "message": formatted_message,
-            "raw_content": original_content  # Store the complete original message
+            "raw_content": raw_content
         }
+        self.reminders.append(reminder)
         
-        # Try to save the reminder
-        try:
-            self.reminders.append(reminder)
-            
-            # Create a clean user message - simpler confirmation without the details
-            user_message = f"✅ I've set a reminder for you for {date_display} at {formatted_time}."
-            
-            return {
-                "response": user_message,
-                "is_reminder": True,
-                "reminder_data": reminder,
-                "status": "success"
-            }
-        except Exception as e:
-            error_message = f"Sorry, I couldn't save your reminder. Please try again with the details for your reminder. Error: {str(e)}"
-            return {
-                "response": error_message,
-                "is_reminder": False,
-                "reminder_data": None,
-                "status": "error"
-            }
+        am_pm = "AM" if hour < 12 else "PM"
+        display_hour = hour % 12 or 12
+        formatted_time = f"{display_hour}:{minute:02d} {am_pm}"
+        
+        reminder_date = datetime.strptime(reminder["date"], "%Y-%m-%d").date()
+        today = datetime.now().date()
+        date_display = "today" if reminder_date == today else "tomorrow" if reminder_date == today + timedelta(days=1) else reminder_date.strftime("%A, %B %d")
+        
+        response = f"Reminder successfully set for {date_display} at {formatted_time}:\n{formatted_message}"
+        reminder_json = json.dumps(reminder, indent=2)
+        response += f"\n\nReminder details:\n```json\n{reminder_json}\n```"
+        
+        return {
+            "response": response,
+            "is_reminder": True,
+            "reminder_data": reminder
+        }
     
     def view_reminders(self) -> str:
         """Retrieve and display all saved reminders."""
@@ -394,11 +334,8 @@ class AlanaAssistant:
             reminders_str.append(f"[{date_display} at {formatted_time}] {reminder['message']}")
         return "\n".join(reminders_str)
     
-    def process_query(self, user_input: str, conversation_history=None) -> Dict[str, Any]:
+    def process_query(self, user_input: str) -> Dict[str, Any]:
         """Process user query and return response."""
-        if conversation_history is None:
-            conversation_history = []
-            
         user_input_lower = user_input.lower().strip()
         
         if user_input_lower == "/view_reminders":
@@ -410,7 +347,7 @@ class AlanaAssistant:
             }
         
         if self.is_reminder_request(user_input):
-            return self.process_reminder(user_input, conversation_history)
+            return self.process_reminder(user_input)
         
         house_matches = self.query_vector_db(user_input, self.house_index)
         guide_matches = self.query_vector_db(user_input, self.guest_guide_index)
@@ -418,37 +355,32 @@ class AlanaAssistant:
         house_context = self.format_matches(house_matches, user_input)
         guide_context = self.format_matches(guide_matches, user_input)
         
-        formatted_history = self.format_conversation_history(conversation_history)
+        formatted_history = ""  # No conversation history in simplified version
         
-        prompt = f"""You are Alana, a friendly and knowledgeable AI assistant for property management employees, powered by AirBrindyGPT. Your personality is warm, confident, and resourceful - you're the colleague everyone loves to work with because you're both highly competent and genuinely supportive. You have a natural warmth in your communication style with a touch of enthusiasm that makes people feel motivated. You speak with a conversational but polished tone, occasionally using friendly phrases like "Let me help with that" or "I've got you covered" that make employees feel supported.
+        prompt = f"""You are Alana, a friendly and knowledgeable AI assistant for property management employees, powered by AirBrindyGPT. Your role is to provide accurate, tailored responses based on property details, messaging guidelines, and your comprehensive knowledge of all houses and rules. Use the context to craft clear, specific, and supportive answers that directly address the employee's query without quoting raw information. Synthesize the information into natural, colleague-like responses with a warm, feminine tone, offering relevant context and explanations to make employees feel supported.
 
         EMPLOYEE QUERY: {user_input}
 
         Recent conversation:
         {formatted_history}
 
-        PERSONALITY TRAITS:
-        1. WARM & APPROACHABLE: You're naturally friendly and make people feel comfortable asking questions. You use warm greetings and sign-offs, and occasionally add encouraging comments.
-        2. CONFIDENT & REASSURING: You respond with confidence that inspires trust. You're never uncertain about what you know, but you're straightforward when information is unavailable.
-        3. EFFICIENT & PRACTICAL: You get to the point quickly with organized, actionable information. You anticipate needs and offer relevant details without being asked.
-        4. RESOURCEFUL & KNOWLEDGEABLE: You draw on your extensive property management knowledge when specific information isn't available, providing general best practices while clearly distinguishing between document-based information and general knowledge.
-        5. PROFESSIONALLY PERSONABLE: You strike a balance between being friendly and maintaining professionalism. You might occasionally use light humor or empathy, but always keep responses focused on work tasks.
-        6. ADAPTABLE COMMUNICATION STYLE: You match your tone to the context - more direct and efficient for urgent matters, warmer and more detailed for complex situations that might cause stress.
-
         INSTRUCTIONS:
         1. Analyze the query to understand the employee's needs (e.g., drafting a message, seeking property details, or requesting communication guidance).
         2. For property-related queries, extract specific details from PROPERTY INFORMATION and present them clearly and concisely. Interpret terms like 'structure,' 'layout,' or 'rooms' as physical attributes of the house (e.g., floor plan, number of bedrooms, bathrooms) unless specified otherwise.
-        3. If no relevant information is found in PROPERTY INFORMATION for a property-related query, clearly state that specific information isn't available in your records, then offer general property management best practices or suggest where they might find this information.
+        3. If no relevant information is found in PROPERTY INFORMATION for a property-related query, kindly state that no details are available (e.g., 'I couldn't find specific information about the layout of `house name`, but I'm happy to help with something else!').
         4. For queries involving rules, instructions, or references to the guest guide, prioritize extracting specific details from MESSAGING GUIDELINES to provide precise instructions (e.g., for fire pit usage, include how to operate it if available in the guidelines).
         5. For communication tasks (e.g., drafting messages or providing tone advice), strictly follow the tone, structure, and content in the MESSAGING GUIDELINES. Explain why the chosen tone or structure works, subtly referencing the guidelines.
         6. When drafting messages, adapt MESSAGE TEMPLATES & EXAMPLES to the context (e.g., property name, issue), and share a brief note on how the message aligns with the guidelines.
         7. If the query is unclear, ask gentle clarifying questions, using PROPERTY INFORMATION or MESSAGING GUIDELINES to guide them (e.g., 'Are you looking for the layout of `house name` or something else? I'm here to help!').
         8. Weave in relevant background or situational context to make responses thorough, but keep them focused and professional.
-        9. IMPORTANT - ACCURACY: Use only information from provided contexts or general property management knowledge. For property-specific details, only use what's in the PROPERTY INFORMATION. Never invent specific property features, policies, or rules that aren't in the provided information.
-        10. When specific information isn't available, clearly say so and then offer general industry knowledge that might be helpful, making it clear you're providing general guidance rather than property-specific details.
-        11. For house-related queries with limited information, provide what's available and suggest what other information might be useful to gather.
-        12. Close responses with a friendly offer for additional assistance or a follow-up question that anticipates their next need.
-        13. Try make the massage short and presice with the information you have, and don't overwelm the user with too much information.
+        9. Do not invent information beyond the provided context or your knowledge.
+        10. Use a warm, colleague-like tone with a feminine touch (e.g., 'Let's get this sorted for you!' or 'I've got the details you need!'), avoiding overly formal or robotic language.
+        11. Ensure responses are concise, precise, and directly address the query without extra fluff.
+        12. If no specific property information is available for a house-related query, lean on general guidelines from the MESSAGING GUIDELINES to offer a helpful response based on standard practices.
+        13. For house-related queries, provide a summary of the most relevant details and offer to share more if needed.
+        14. Answer precisely, avoiding repetition or unnecessary filler.
+        15. For general queries, summarize the most relevant details and invite further questions.
+        16. If no house name is provided, use general message templates and examples from MESSAGING GUIDELINES to provide a helpful response based on standard practices.
 
         PROPERTY INFORMATION:
         {house_context}
@@ -471,71 +403,58 @@ class AlanaAssistant:
     def chat(self):
         """Interactive chat loop with rich Markdown rendering."""
         welcome_message = """
-        # Welcome to Alana, Your AirBrindyGPT Assistant!
+# Welcome to Alana, Your AirBrindyGPT Assistant!
 
-        Hi there! I'm **Alana**, here to help with all things property management.  
-        - Use `/note`, `/remind`, or phrases like "remind me" to set a reminder.   
-        - Ask about properties, rules, or messaging guidelines, and I'll get you the details!  
+Hi there! I'm **Alana**, here to help with all things property management.  
+- Use `/note`, `/remind`, or phrases like "remind me" to set a reminder.   
+- Ask about properties, rules, or messaging guidelines, and I'll get you the details!  
 
-        What can I do for you today?
-        """
+What can I do for you today?
+"""
         if has_rich:
-            console.print(Markdown(welcome_message))
+            console.print(Panel(Markdown(welcome_message), title="🏠 Alana Assistant", border_style="green"))
         else:
             print(welcome_message)
             print("\nTip: Install 'rich' package for better markdown rendering: pip install rich\n")
         
-        conversation_history = []
-        
         while True:
-            user_input = input("\nYou: ").strip()
+            if has_rich:
+                console.print("[user]You:[/user] ", end="")
+                user_input = input().strip()
+            else:
+                user_input = input("\nYou: ").strip()
+                
             if user_input.lower() == '/exit':
                 goodbye_message = "**Goodbye!** Reach out anytime you need me!"
                 if has_rich:
-                    console.print(Markdown(goodbye_message))
+                    console.print(Panel(Markdown(goodbye_message), title="👋 Alana", border_style="green"))
                 else:
                     print(goodbye_message)
                 break
+                
+            result = self.process_query(user_input)
+            response_message = result['response']
             
-            # Add user message to history
-            conversation_history.append({"role": "user", "content": user_input})
-            
-            # Process the query
-            result = self.process_query(user_input, conversation_history)
-            
-            # Add assistant response to history
-            conversation_history.append({"role": "assistant", "content": result['response']})
-            
-            # Display the response
-            response_message = f"**Alana:** {result['response']}"
             if has_rich:
-                console.print(Markdown(response_message))
+                if result['is_reminder']:
+                    console.print(Panel(Markdown(response_message), title="⏰ Reminder Set", border_style="reminder"))
+                else:
+                    console.print(Panel(Markdown(response_message), title="🏠 Alana", border_style="assistant"))
             else:
-                print(f"\n{response_message}")
+                print(f"\nAlana: {response_message}")
 
-def process_backend_query(conversation_history, user_input: str) -> Dict[str, Any]:
-    """Process a query from the backend API, with conversation history."""
+def process_backend_query(user_input: str) -> Dict[str, Any]:
+    """Process a query from the backend API."""
     try:
         assistant = AlanaAssistant()
-        return assistant.process_query(user_input, conversation_history)
+        return assistant.process_query(user_input)
     except Exception as e:
         return {
             "response": f"Oops, something went wrong: {str(e)}. Let's try again!",
             "is_reminder": False,
-            "reminder_data": None,
-            "status": "error"
+            "reminder_data": None
         }
 
 if __name__ == "__main__":
-    # Example usage
-    sample_history = [
-        {"role": "user", "content": "What's the check-in time for Heatherbrae 23?"},
-        {"role": "assistant", "content": "The check-in time for Heatherbrae 23 is 3:00 PM. Please remember to provide the access code to guests."}
-    ]
-    sample_input = "how can the guest opent the garage at coconino?"
-    
-    # Process the query using the backend integration function
-    response = process_backend_query(sample_history, sample_input)
-    
-    console.print(Markdown(f"Message: {response['response']}"))
-    console.print(Markdown(json.dumps(response['reminder_data'], indent=2)))
+    assistant = AlanaAssistant()
+    assistant.chat()

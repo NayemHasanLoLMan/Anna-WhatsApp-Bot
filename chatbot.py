@@ -17,8 +17,8 @@ class AnnaAssistant:
         self.GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
         
         # Index names
-        self.HOUSE_INDEX_NAME = "house-notes-doc-embeddings"
-        self.GUEST_GUIDE_INDEX_NAME = "guest-messaging-guide-doc-embeddings"
+        self.HOUSE_INDEX_NAME = "house-information-embeddings"
+        self.GUEST_GUIDE_INDEX_NAME = "information-massageing-guide-embeddings"
         
         # Initialize Pinecone
         self.pc = Pinecone(api_key=self.PINECONE_API_KEY)
@@ -61,7 +61,7 @@ class AnnaAssistant:
             
         try:
             embedding_model = genai.embed_content(
-                model="models/embedding-001",
+                model="models/text-embedding-004",
                 content=text,
                 task_type="retrieval_document"
             )
@@ -352,7 +352,13 @@ class AnnaAssistant:
             8. Do not invent information beyond what is provided in the context or your knowledge.
             9. Maintain a helpful, colleague-like tone, avoiding overly formal or robotic language.
             10. Ensure responses are concise, precise, and directly address the query without unnecessary details.
-            11. If no specific property information or messaging guidelines are available, rely on general knowledge to provide a helpful response, and explain any limitations.
+            11. If no specific property information is available for a house-related query, prioritize general guidelines from the MESSAGING GUIDELINES section to provide a helpful response based on standard practices.
+            12. For house related quries, don't give all the information at once. Instead, provide a summary of the most relevant details and offer to provide more information if needed.
+            13. Answare precisely and avoid unnecessary repetition or filler content.
+            14. for general queries, provide a summary of the most relevant details and offer to provide more information if needed.
+            15. if no house name is given within the query use general massage templates and examples to provide a helpful response based on standard practices.
+
+
 
             PROPERTY INFORMATION ({house_name}):
             {house_context if house_context.strip() else "No specific property information available for this query."}
@@ -369,10 +375,6 @@ class AnnaAssistant:
             # Add house switch message if needed
             if info["house_switch_msg"]:
                 answer = f"{info['house_switch_msg']}\n\n{answer}"
-            
-            # Add sources if available
-            if info["sources"]:
-                answer += f"\n\n(Information sourced from: {', '.join(info['sources'])})"
             
             return answer
         except Exception as e:
@@ -410,12 +412,13 @@ class AnnaAssistant:
         Returns a tuple of (date_str, time_str, natural_date)
         """
         text_lower = text.lower()
+        print(f"Parsing reminder time from: '{text_lower}'")  # Debug logging
         
         # Extract specified time (enhanced patterns)
         time_patterns = [
-            r'(\d{1,2}):(\d{2})(?:\s*([ap]m))?',           # matches "5:00", "5:00 am", "05:00"
-            r'(\d{1,2})\s*([ap]m)',                        # matches "5 am", "5am", "5 pm"
-            r'at\s+(\d{1,2})(?::(\d{2}))?(?:\s*([ap]m))?'  # matches "at 5", "at 5:00", "at 5am"
+            r'(\d{1,2})[\.:](\d{2})(?:\s*([ap]m))?',      # matches "5:00", "5.00", "5:00 am"
+            r'(\d{1,2})\s*([ap]m)',                       # matches "5 am", "5am", "5 pm"
+            r'at\s+(\d{1,2})(?:[\.:](\d{2}))?(?:\s*([ap]m))?'  # matches "at 5", "at 5:00", "at 5.00"
         ]
         
         time_str = None
@@ -432,28 +435,105 @@ class AnnaAssistant:
                 if len(groups) > 1 and groups[1] and groups[1].isdigit():
                     minutes = int(groups[1])
                 
-                # Handle am/pm if present
-                am_pm = None
-                if len(groups) > 2 and groups[2]:
-                    am_pm = groups[2]
+                # Check for PM/AM in the matched groups and surrounding context
+                is_pm = False
+                is_am = False
                 
-                # Adjust hour for 12-hour format if am/pm is specified
-                if am_pm:
-                    if am_pm.lower() == 'pm' and hour < 12:
-                        hour += 12
-                    elif am_pm.lower() == 'am' and hour == 12:
-                        hour = 0
-                elif hour < 12 and ("evening" in text_lower or "tonight" in text_lower):
-                    # Infer PM for evening hours if no am/pm specified
+                # Check the actual match for AM/PM
+                for g in groups:
+                    if g and isinstance(g, str):
+                        if "pm" in g.lower():
+                            is_pm = True
+                            break
+                        elif "am" in g.lower():
+                            is_am = True
+                            break
+                
+                # If not found in groups, check surrounding context
+                if not is_pm and not is_am:
+                    # Get the entire sentence or segment containing the time
+                    sentence_pattern = r'[^.!?]*' + re.escape(matches.group(0)) + r'[^.!?]*'
+                    sentence_match = re.search(sentence_pattern, text_lower)
+                    
+                    if sentence_match:
+                        context = sentence_match.group(0)
+                        if "pm" in context or "p.m" in context or "evening" in context:
+                            is_pm = True
+                        elif "am" in context or "a.m" in context or "morning" in context:
+                            is_am = True
+                
+                # Apply AM/PM conversion
+                if is_pm and hour < 12:
                     hour += 12
+                elif is_am and hour == 12:
+                    hour = 0  # Convert 12 AM to 00 hours
                 
                 time_str = f"{hour:02d}:{minutes:02d}"
+                print(f"Extracted time: {hour}:{minutes:02d} (is_pm: {is_pm}, is_am: {is_am})")
                 break
         
         # Date extraction with enhanced pattern recognition
         now = datetime.now()
         date_str = "today"  # Default to today
         natural_date = now.strftime("%Y-%m-%d")  # Default formatted date
+        
+        # Dictionary of month names to month numbers
+        month_names = {
+            "january": 1, "jan": 1,
+            "february": 2, "feb": 2,
+            "march": 3, "mar": 3,
+            "april": 4, "apr": 4,
+            "may": 5,
+            "june": 6, "jun": 6,
+            "july": 7, "jul": 7,
+            "august": 8, "aug": 8,
+            "september": 9, "sep": 9, "sept": 9,
+            "october": 10, "oct": 10,
+            "november": 11, "nov": 11,
+            "december": 12, "dec": 12
+        }
+        
+        # First, check for ordinal dates like "23rd of May" - prioritize this pattern
+        ordinal_date_pattern = r'(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(' + '|'.join(list(month_names.keys())) + r')'
+        ordinal_match = re.search(ordinal_date_pattern, text_lower)
+        
+        if ordinal_match:
+            day_num, month_name = ordinal_match.groups()
+            month_num = month_names[month_name]
+            day_num = int(day_num)
+            
+            # Set year (current or next if the date has passed)
+            target_year = now.year
+            if (month_num < now.month) or (month_num == now.month and day_num < now.day):
+                target_year += 1
+                
+            specific_date = datetime(target_year, month_num, day_num)
+            date_str = f"on {month_name} {day_num}"
+            natural_date = specific_date.strftime("%Y-%m-%d")
+            
+            # If no time was found, set a default based on context
+            if not time_str:
+                if "morning" in text_lower:
+                    time_str = "09:00"
+                elif "afternoon" in text_lower:
+                    time_str = "14:00"
+                elif "evening" in text_lower or "tonight" in text_lower:
+                    time_str = "19:00"
+                else:
+                    time_str = "09:00"  # Default to 9 AM
+                    
+            print(f"Parsed date from ordinal: {natural_date}, display: {date_str}")
+            
+        # Handle "today", "tomorrow", "next week" patterns
+        elif "today" in text_lower or "toay" in text_lower:  # Handle common misspelling
+            date_str = "today"
+            natural_date = now.strftime("%Y-%m-%d")
+            print(f"Parsed date as today: {natural_date}")
+        
+        elif "tomorrow" in text_lower or "tommorow" in text_lower:  # Handle common misspelling
+            date_str = "tomorrow"
+            natural_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+            print(f"Parsed date as tomorrow: {natural_date}")
         
         # Dictionary of day names to weekday numbers (0=Monday, 6=Sunday)
         days_of_week = {
@@ -465,11 +545,6 @@ class AnnaAssistant:
             "saturday": 5, "sat": 5,
             "sunday": 6, "sun": 6
         }
-        
-        # Check for specific date patterns
-        if "tomorrow" in text_lower or "tommorow" in text_lower:  # Handle common misspelling
-            date_str = "tomorrow"
-            natural_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
         
         # Handle day names (e.g., "on Monday", "this Friday")
         for day_name, day_num in days_of_week.items():
@@ -487,6 +562,7 @@ class AnnaAssistant:
                 target_date = now + timedelta(days=days_until)
                 date_str = f"on {day_name}"
                 natural_date = target_date.strftime("%Y-%m-%d")
+                print(f"Parsed date from day name: {natural_date}, display: {date_str}")
                 break
         
         # Handle "next week" patterns
@@ -495,23 +571,9 @@ class AnnaAssistant:
             next_monday = now + timedelta(days=(7 - now.weekday()))
             date_str = "next week"
             natural_date = next_monday.strftime("%Y-%m-%d")
+            print(f"Parsed date as next week: {natural_date}")
         
         # Handle specific date formats like "on May 15"
-        month_names = {
-            "january": 1, "jan": 1,
-            "february": 2, "feb": 2,
-            "march": 3, "mar": 3,
-            "april": 4, "apr": 4,
-            "may": 5,
-            "june": 6, "jun": 6,
-            "july": 7, "jul": 7,
-            "august": 8, "aug": 8,
-            "september": 9, "sep": 9, "sept": 9,
-            "october": 10, "oct": 10,
-            "november": 11, "nov": 11,
-            "december": 12, "dec": 12
-        }
-        
         specific_date_pattern = r'(?:on\s+)?(' + '|'.join(month_names.keys()) + r')\s+(\d{1,2})(?:st|nd|rd|th)?'
         date_match = re.search(specific_date_pattern, text_lower)
         
@@ -528,6 +590,7 @@ class AnnaAssistant:
             specific_date = datetime(target_year, month_num, day_num)
             date_str = f"on {month_name} {day}"
             natural_date = specific_date.strftime("%Y-%m-%d")
+            print(f"Parsed date from month-day: {natural_date}, display: {date_str}")
         
         # If no time was found, set a default based on context
         if not time_str:
@@ -539,7 +602,9 @@ class AnnaAssistant:
                 time_str = "19:00"
             else:
                 time_str = "09:00"  # Default to 9 AM
+            print(f"Using default time: {time_str}")
         
+        print(f"Final parsed time: {time_str}, date: {natural_date}, display: {date_str}")
         return date_str, time_str, natural_date
     
     def extract_reminder_content(self, text: str) -> str:
@@ -829,7 +894,7 @@ if __name__ == "__main__":
         {"role": "user", "content": "What's the check-in time for Heatherbrae 23?"},
         {"role": "assistant", "content": "The check-in time for Heatherbrae 23 is 3:00 PM. Please remember to provide the access code to guests."}
     ]
-    sample_input = "/remind me to send welcome message to Heatherbrae guests tomorrow at 9am"
+    sample_input = "set a reminder for toay at 10.20 for the check-in time for Heatherbrae 23"
     
     # Process the query using the backend integration function
     response = process_backend_query(sample_history, sample_input)

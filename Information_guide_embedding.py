@@ -32,7 +32,7 @@ class WordVectorizerGeminiPinecone:
         self.chunk_size = chunk_size
 
         # Google Gemini setup
-        self.embedding_model = "models/embedding-001"
+        self.embedding_model = "models/text-embedding-004"
         genai.configure(api_key=GOOGLE_API_KEY)
 
         # Pinecone setup
@@ -225,12 +225,12 @@ if __name__ == "__main__":
     # PINECONE_INDEX_NAME = "information-massageing-guide-embeddings"
     
     vectorizer = WordVectorizerGeminiPinecone(
-        file_path="D:\\brindyjean\\Guest Messaging Guide\\Guest Messaging Guide Organized.pdf",
+        file_path="D:\\brindyjean\\Guest Messaging Guide\\Guest Messaging Guide (Brandyjeans).docx",
         pinecone_index_name="information-massageing-guide-embeddings",
         delete_existing_index=True,
         chunk_size=2000  # Adjust chunk size as needed
     )
     
-    # # Process all documents
-    # print(f"Processing {FILE_PATH}")
-    # vectorizer.embed_and_store(FILE_PATH)
+    # Process all documents
+    print(f"Processing {vectorizer.file_path}")
+    vectorizer.embed_and_store(vectorizer.file_path)
