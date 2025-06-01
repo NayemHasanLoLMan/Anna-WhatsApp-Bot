@@ -1,569 +1,367 @@
-# import os
-# import re
-# from typing import List, Dict
-# import pytesseract
-# from PIL import Image
-# import io
-# from docx import Document
-# from pinecone import Pinecone, ServerlessSpec
-# import google.generativeai as genai
-# import docx2txt
-# import fitz  # PyMuPDF
-# from dotenv import load_dotenv
 
-# class WordVectorizerGeminiPinecone:
-#     def __init__(
-#         self,
-#         file_path: str,
-#         pinecone_index_name: str,
-#         house_name: str,
-#         PINECONE_API_KEY = os.environ.get('PINECONE_API_KEY'),
-#         GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY'),
-#     ):
-#         """
-#         Initialize the Word document vectorizer with Google Gemini embeddings and Pinecone storage.
-#         If delete_existing_index=True, deletes the current index before embedding new data.
-#         """
-#         if not os.path.exists(file_path):
-#             raise FileNotFoundError(f"File not found at: {file_path}")
-#         self.file_path = file_path
-#         self.index_name = pinecone_index_name
-#         self.house_name = house_name  # Manually set house name
-
-#         # Google Gemini setup
-#         self.embedding_model = "models/text-embedding-004"
-#         genai.configure(api_key=GOOGLE_API_KEY)
-
-#         # Pinecone setup
-#         self.pc = Pinecone(api_key=PINECONE_API_KEY)
-
-
-#         if pinecone_index_name not in [i.name for i in self.pc.list_indexes()]:
-#             print(f"Creating new index: {pinecone_index_name}")
-#             self.pc.create_index(
-#                 name=pinecone_index_name,
-#                 dimension=768,
-#                 metric="cosine",
-#                 spec=ServerlessSpec(cloud="aws", region="us-east-1")
-#             )
-
-#         self.index = self.pc.Index(pinecone_index_name)
-
-#     def extract_text_from_document(self, doc_path: str) -> str:
-#         """Extract all text from a document (PDF or DOCX), including OCR from images."""
-#         try:
-#             if doc_path.lower().endswith('.pdf'):
-#                 # Handle PDF files
-#                 doc = fitz.open(doc_path)
-#                 text_content = []
-#                 for page in doc:
-#                     text_content.append(page.get_text())
-#                 doc_text = "\n\n".join(text_content)
-                
-#                 # Extract images and perform OCR
-#                 ocr_texts = self.extract_images_and_ocr(doc_path)
-                
-#                 # Combine text and OCR results
-#                 full_text = doc_text + "\n\n" + "\n\n".join(ocr_texts)
-#                 return full_text.strip()
-                
-#             elif doc_path.lower().endswith('.docx'):
-#                 # Handle DOCX files (existing functionality)
-#                 doc_text = docx2txt.process(doc_path)
-#                 ocr_texts = self.extract_images_and_ocr(doc_path)
-#                 full_text = doc_text + "\n\n" + "\n\n".join(ocr_texts)
-#                 return full_text.strip()
-#             else:
-#                 raise ValueError(f"Unsupported file type: {doc_path}")
-                
-#         except Exception as e:
-#             print(f"Error extracting text from {doc_path}: {e}")
-#             return ""
-
-#     def extract_images_and_ocr(self, doc_path: str) -> List[str]:
-#         """Extract images from document and perform OCR."""
-#         ocr_texts = []
-#         try:
-#             doc = fitz.open(doc_path)
-#             for page_num in range(len(doc)):
-#                 page = doc.load_page(page_num)
-#                 image_list = page.get_images(full=True)
-                
-#                 # Also check for images in PDF format
-#                 if doc_path.lower().endswith('.pdf'):
-#                     pix = page.get_pixmap()
-#                     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-#                     try:
-#                         text = pytesseract.image_to_string(img)
-#                         if text.strip():
-#                             ocr_texts.append(f"[Image OCR Text Page {page_num+1}]: {text.strip()}")
-#                     except Exception as e:
-#                         print(f"OCR error on page {page_num}: {e}")
-                
-#                 # Process embedded images
-#                 for img_idx, img_info in enumerate(image_list):
-#                     xref = img_info[0]
-#                     base_image = doc.extract_image(xref)
-#                     image_bytes = base_image["image"]
-#                     image = Image.open(io.BytesIO(image_bytes))
-#                     try:
-#                         text = pytesseract.image_to_string(image)
-#                         if text.strip():
-#                             ocr_texts.append(f"[Image OCR Text Page {page_num+1}]: {text.strip()}")
-#                     except Exception as e:
-#                         print(f"OCR error on image {img_idx} of page {page_num}: {e}")
-                        
-#         except Exception as e:
-#             print(f"Error extracting images from {doc_path}: {e}")
-            
-#         return ocr_texts
-
-#     def create_embedding(self, text: str) -> List[float]:
-#         truncated = text[:8000]
-#         result = genai.embed_content(
-#             model=self.embedding_model,
-#             content=truncated,
-#             task_type="retrieval_document"
-#         )
-#         return result["embedding"]
-
-#     def embed_and_store(self, doc_path: str):
-#         """
-#         Process a single document and create a single embedding vector for the entire document.
-#         """
-#         file_name = os.path.basename(doc_path)
-        
-#         # Extract all text from document including OCR of images
-#         full_text = self.extract_text_from_document(doc_path)
-        
-#         if not full_text:
-#             print(f"Warning: No text extracted from {file_name}")
-#             return
-            
-#         try:
-#             # Create embedding for the entire document
-#             embedding = self.create_embedding(full_text)
-#             vector_id = self.house_name  # Use the provided house name for vector ID
-            
-#             metadata = {
-#                 "file_name": file_name,
-#                 "house_name": self.house_name,  # Use the provided house name
-#                 "text": full_text[:8000],  # Truncate for metadata
-#                 "char_count": len(full_text)
-#             }
-
-#             # Check if the house name already exists in the index
-#             existing_query = self.index.query(
-#                 vector=self.create_embedding(self.house_name),
-#                 top_k=1,
-#                 include_metadata=True
-#             )
-#             if existing_query["matches"]:
-#                 print(f"Replacing existing file for house: {self.house_name}")
-#                 self.index.delete(ids=[vector_id])  # Delete the existing vector
-            
-#             # Upload the new vector for the house
-#             self.index.upsert(vectors=[{
-#                 "id": vector_id,
-#                 "values": embedding,
-#                 "metadata": metadata
-#             }])
-            
-#             print(f"Uploaded vector for house: {vector_id}")
-            
-#         except Exception as e:
-#             print(f"Error embedding document {file_name}: {e}")
-
-#     # def process(self):
-#     #     print(f"Processing {self.file_path}")
-#     #     self.embed_and_store(self.file_path)
-
-#     def query_similar(self, query_text: str, top_k: int = 5):
-#         query_embedding = self.create_embedding(query_text)
-#         results = self.index.query(
-#             vector=query_embedding,
-#             top_k=top_k,
-#             include_metadata=True
-#         )
-#         return results
-
-
-# # Example usage
-# if __name__ == "__main__":
-#     # FILE_PATH = "D:\\brindyjean\\House Notes (Internal)\\Req (1).pdf"
-#     # PINECONE_INDEX_NAME = "house-information-embeddings"
-#     # HOUSE_NAME = "Test House"  # Example house name
-    
-#     vectorizer = WordVectorizerGeminiPinecone(
-#         file_path="D:\\brindyjean\\House Notes (Internal)\\HN_ 81st Way Desert Rose.docx",
-#         pinecone_index_name="house-information-embeddings",
-#         house_name="81st Way Desert Rose",
-#     )
-    
-#     # Process the given document
-#     print(f"Processing {vectorizer.file_path}")
-#     vectorizer.embed_and_store(vectorizer.file_path)
-
-
-
-
-
-
+import random
+import string
 import os
-import re
-from typing import List, Dict, Tuple
+import fitz  # PyMuPDF
+from typing import List, Dict
+import openai
 import pytesseract
 from PIL import Image
 import io
-from docx import Document
-from pinecone import Pinecone, ServerlessSpec
-import google.generativeai as genai
-import docx2txt
-import fitz  # PyMuPDF
 from dotenv import load_dotenv
+from pinecone import Pinecone, ServerlessSpec
+from docx import Document
+import re
 
-class WordVectorizerGeminiPinecone:
+load_dotenv()
+
+class WordVectorizerOpenAIPinecone:
     def __init__(
         self,
-        file_path: str,
+        folder_path: str,
         pinecone_index_name: str,
-        house_name: str,
-        chunk_size: int = 6000,  # Leave some buffer for embedding model
-        chunk_overlap: int = 5000,  # Overlap between chunks for context continuity
-        PINECONE_API_KEY = os.environ.get('PINECONE_API_KEY'),
-        GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY'),
     ):
         """
-        Initialize the Word document vectorizer with Google Gemini embeddings and Pinecone storage.
-        Now supports chunking for large documents.
-        
-        Args:
-            chunk_size: Maximum characters per chunk (default 6000 to leave buffer)
-            chunk_overlap: Characters to overlap between chunks for context continuity
+        Initialize the PDF vectorizer with OpenAI embeddings and Pinecone storage.
+        Processes PDF files from the specified folder path, using the PDF name as part of the vector ID.
         """
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"File not found at: {file_path}")
-        self.file_path = file_path
+        if not os.path.exists(folder_path):
+            raise FileNotFoundError(f"Folder not found at: {folder_path}")
+        self.folder_path = folder_path
         self.index_name = pinecone_index_name
-        self.house_name = house_name
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
 
-        # Google Gemini setup
-        self.embedding_model = "models/text-embedding-004"
-        genai.configure(api_key=GOOGLE_API_KEY)
+        # OpenAI setup
+        self.embedding_model = "text-embedding-ada-002"
+        openai.api_key = os.getenv("OPENAI_API_KEY")
 
         # Pinecone setup
-        self.pc = Pinecone(api_key=PINECONE_API_KEY)
+        self.pc = Pinecone(os.environ.get('PINECONE_API_KEY'))
 
         if pinecone_index_name not in [i.name for i in self.pc.list_indexes()]:
             print(f"Creating new index: {pinecone_index_name}")
             self.pc.create_index(
                 name=pinecone_index_name,
-                dimension=768,
+                dimension=1536,  # Dimension for text-embedding-3-small
                 metric="cosine",
                 spec=ServerlessSpec(cloud="aws", region="us-east-1")
             )
 
         self.index = self.pc.Index(pinecone_index_name)
 
-    def extract_text_from_document(self, doc_path: str) -> str:
-        """Extract all text from a document (PDF or DOCX), including OCR from images."""
+    def generate_unique_id(self) -> str:
+        """Generate a 5-character unique alphanumeric ID."""
+        return ''.join(random.choices(string.ascii_lowercase + string.digits, k=5))
+
+    def sanitize_vector_id(self, vector_id: str) -> str:
+        """Sanitize the vector ID to ensure it contains only ASCII characters and is valid for Pinecone.
+        Replaces spaces, parentheses, and other non-alphanumeric characters with underscores."""
+        # Replace spaces, parentheses, and other special characters with underscores
+        sanitized = re.sub(r'[^\w\d]', '_', vector_id)
+        # Ensure it's ASCII only by replacing any remaining non-ASCII characters
+        sanitized = re.sub(r'[^\x00-\x7F]+', '_', sanitized)
+        # Truncate if too long (Pinecone has limits on ID length)
+        if len(sanitized) > 64:
+            # Keep a prefix and add a hash-like suffix for uniqueness
+            prefix = sanitized[:54]  # Leave room for unique suffix
+            suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+            sanitized = f"{prefix}_{suffix}"
+        return sanitized
+    
+    def extract_text_from_docx(self, file_path: str) -> str:
+        """Extract text from a DOCX file."""
         try:
-            if doc_path.lower().endswith('.pdf'):
-                # Handle PDF files
-                doc = fitz.open(doc_path)
-                text_content = []
-                for page in doc:
-                    text_content.append(page.get_text())
-                doc_text = "\n\n".join(text_content)
-                
-                # Extract images and perform OCR
-                ocr_texts = self.extract_images_and_ocr(doc_path)
-                
-                # Combine text and OCR results
-                full_text = doc_text + "\n\n" + "\n\n".join(ocr_texts)
-                return full_text.strip()
-                
-            elif doc_path.lower().endswith('.docx'):
-                # Handle DOCX files (existing functionality)
-                doc_text = docx2txt.process(doc_path)
-                ocr_texts = self.extract_images_and_ocr(doc_path)
-                full_text = doc_text + "\n\n" + "\n\n".join(ocr_texts)
-                return full_text.strip()
-            else:
-                raise ValueError(f"Unsupported file type: {doc_path}")
-                
+            doc = Document(file_path)
+            text_content = []
+            
+            # Extract text from paragraphs
+            for paragraph in doc.paragraphs:
+                if paragraph.text.strip():
+                    text_content.append(paragraph.text.strip())
+            
+            # Extract text from tables
+            for table in doc.tables:
+                for row in table.rows:
+                    row_text = []
+                    for cell in row.cells:
+                        if cell.text.strip():
+                            row_text.append(cell.text.strip())
+                    if row_text:
+                        text_content.append(" | ".join(row_text))
+            
+            return "\n\n".join(text_content)
+        
         except Exception as e:
-            print(f"Error extracting text from {doc_path}: {e}")
+            print(f"Error extracting text from DOCX {file_path}: {e}")
             return ""
 
-    def extract_images_and_ocr(self, doc_path: str) -> List[str]:
-        """Extract images from document and perform OCR."""
-        ocr_texts = []
+    def extract_text_from_pdf_page(self, doc: fitz.Document, page_num: int) -> str:
+        """Extract text from a single PDF page, including OCR from images."""
         try:
-            doc = fitz.open(doc_path)
-            for page_num in range(len(doc)):
-                page = doc.load_page(page_num)
-                image_list = page.get_images(full=True)
-                
-                # Also check for images in PDF format
-                if doc_path.lower().endswith('.pdf'):
-                    pix = page.get_pixmap()
-                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                    try:
-                        text = pytesseract.image_to_string(img)
-                        if text.strip():
-                            ocr_texts.append(f"[Image OCR Text Page {page_num+1}]: {text.strip()}")
-                    except Exception as e:
-                        print(f"OCR error on page {page_num}: {e}")
-                
-                # Process embedded images
-                for img_idx, img_info in enumerate(image_list):
-                    xref = img_info[0]
-                    base_image = doc.extract_image(xref)
-                    image_bytes = base_image["image"]
-                    image = Image.open(io.BytesIO(image_bytes))
-                    try:
-                        text = pytesseract.image_to_string(image)
-                        if text.strip():
-                            ocr_texts.append(f"[Image OCR Text Page {page_num+1}]: {text.strip()}")
-                    except Exception as e:
-                        print(f"OCR error on image {img_idx} of page {page_num}: {e}")
-                        
+            page = doc.load_page(page_num)
+            text_content = page.get_text().strip()
+
+            # Perform OCR on the page as an image
+            ocr_texts = []
+            pix = page.get_pixmap()
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            try:
+                ocr_text = pytesseract.image_to_string(img).strip()
+                if ocr_text:
+                    ocr_texts.append(ocr_text)
+            except Exception as e:
+                print(f"OCR error on page {page_num + 1}: {e}")
+
+            # Process embedded images
+            image_list = page.get_images(full=True)
+            for img_idx, img_info in enumerate(image_list):
+                xref = img_info[0]
+                base_image = doc.extract_image(xref)
+                image_bytes = base_image["image"]
+                image = Image.open(io.BytesIO(image_bytes))
+                try:
+                    ocr_text = pytesseract.image_to_string(image).strip()
+                    if ocr_text:
+                        ocr_texts.append(ocr_text)
+                except Exception as e:
+                    print(f"OCR error on image {img_idx} of page {page_num + 1}: {e}")
+
+            # Combine page text and OCR results
+            full_text = text_content + "\n\n" + "\n\n".join(ocr_texts)
+            return full_text.strip()
+
         except Exception as e:
-            print(f"Error extracting images from {doc_path}: {e}")
-            
-        return ocr_texts
+            print(f"Error extracting text from page {page_num + 1}: {e}")
+            return ""
 
     def create_embedding(self, text: str) -> List[float]:
-        """Create embedding without truncation - assumes text is already properly sized"""
-        result = genai.embed_content(
-            model=self.embedding_model,
-            content=text,
-            task_type="retrieval_document"
-        )
-        return result["embedding"]
-
-    def chunk_text(self, text: str) -> List[Tuple[str, int, int]]:
-        """
-        Split text into overlapping chunks.
-        
-        Returns:
-            List of tuples: (chunk_text, start_position, end_position)
-        """
-        if len(text) <= self.chunk_size:
-            return [(text, 0, len(text))]
-        
-        chunks = []
-        start = 0
-        
-        while start < len(text):
-            end = start + self.chunk_size
-            
-            # If this isn't the last chunk, try to break at a sentence or paragraph
-            if end < len(text):
-                # Look for sentence endings within the last 200 characters
-                search_start = max(end - 200, start + self.chunk_size // 2)
-                sentence_break = max(
-                    text.rfind('.', search_start, end),
-                    text.rfind('!', search_start, end),
-                    text.rfind('?', search_start, end),
-                    text.rfind('\n\n', search_start, end)
-                )
-                
-                if sentence_break > search_start:
-                    end = sentence_break + 1
-            
-            chunk_text = text[start:end].strip()
-            if chunk_text:  # Only add non-empty chunks
-                chunks.append((chunk_text, start, end))
-            
-            # Move start position with overlap
-            start = end - self.chunk_overlap
-            
-            # Prevent infinite loop
-            if start >= end:
-                start = end
-                
-        return chunks
-
-    def delete_existing_house_vectors(self):
-        """Delete all existing vectors for this house name"""
+        """Create an embedding for the given text using OpenAI's embedding model."""
         try:
-            # Query for all vectors with this house name
+            # Truncate text to avoid exceeding token limits (approx. 8192 tokens for text-embedding-3-small)
+            truncated = text[:8000]
+            response = openai.Embedding.create(
+                model=self.embedding_model,
+                input=truncated
+            )
+            return response['data'][0]['embedding']
+        except Exception as e:
+            print(f"Error creating embedding: {e}")
+            return []
+
+    def delete_vectors_by_document_name(self, document_name: str):
+        """Delete all existing vectors in the index related to a specific document name."""
+        try:
             results = self.index.query(
-                vector=[0.0] * 768,  # Dummy vector
-                top_k=10000,  # Large number to get all
+                vector=[0.0] * 1536,
+                top_k=10000,
                 include_metadata=True,
-                filter={"house_name": self.house_name}
+                filter={"document_name": {"$eq": document_name}}
             )
             
-            if results["matches"]:
-                vector_ids = [match["id"] for match in results["matches"]]
-                self.index.delete(ids=vector_ids)
-                print(f"Deleted {len(vector_ids)} existing vectors for house: {self.house_name}")
+            if results and "matches" in results:
+                vector_ids = [match["id"] for match in results["matches"] if "id" in match]
+                
+                if vector_ids:
+                    batch_size = 100
+                    for i in range(0, len(vector_ids), batch_size):
+                        batch = vector_ids[i:i+batch_size]
+                        self.index.delete(ids=batch)
+                    
+                    print(f"Deleted {len(vector_ids)} vectors for document: {document_name}")
+                else:
+                    print(f"No vectors found for document: {document_name}")
             else:
-                print(f"No existing vectors found for house: {self.house_name}")
+                print(f"No matches found for document: {document_name}")
                 
         except Exception as e:
-            print(f"Error deleting existing vectors: {e}")
+            print(f"Error deleting vectors for document {document_name}: {e}")
 
-    def embed_and_store(self, doc_path: str):
+
+
+    def embed_and_store_document(self, file_path: str, house_name: str, replace_existing: bool = True):
         """
-        Process a document and create multiple embedding vectors if needed.
-        Each chunk gets stored as a separate vector with the same house name.
+        Process a single PDF or DOCX document and create embeddings.
+        Store embeddings in Pinecone with a unique ID.
+        If replace_existing is True, delete existing vectors for the same document before adding new ones.
         """
-        file_name = os.path.basename(doc_path)
+        file_name = os.path.splitext(os.path.basename(file_path))[0]  # Extract file name without extension
+        file_extension = os.path.splitext(file_path)[1].lower()
         
-        # Extract all text from document including OCR of images
-        full_text = self.extract_text_from_document(doc_path)
-        
-        if not full_text:
-            print(f"Warning: No text extracted from {file_name}")
-            return
+        try:
+            # If replacing existing vectors, delete them first
+            if replace_existing:
+                self.delete_vectors_by_document_name(file_name)  # This method works for any document type
             
-        print(f"Document length: {len(full_text)} characters")
-        
-        # Delete existing vectors for this house
-        self.delete_existing_house_vectors()
-        
-        # Chunk the text
-        chunks = self.chunk_text(full_text)
-        print(f"Created {len(chunks)} chunks for processing")
-        
-        vectors_to_upsert = []
-        
-        for i, (chunk_text, start_pos, end_pos) in enumerate(chunks):
-            try:
-                # Create embedding for this chunk
-                embedding = self.create_embedding(chunk_text)
+            # Extract text based on file type
+            if file_extension == '.pdf':
+                doc = fitz.open(file_path)
+                print(f"Processing PDF {file_path} with {len(doc)} pages")
                 
-                # Create unique vector ID for this chunk
-                vector_id = f"{self.house_name}_chunk_{i+1}"
+                # List to collect vectors for batch upsert
+                vectors_batch = []
+                batch_size = 50
                 
-                metadata = {
-                    "file_name": file_name,
-                    "house_name": self.house_name,
-                    "chunk_index": i + 1,
-                    "total_chunks": len(chunks),
-                    "text": chunk_text[:1000],  # Store first 1000 chars for preview
-                    "full_text_start": start_pos,
-                    "full_text_end": end_pos,
-                    "chunk_char_count": len(chunk_text),
-                    "total_document_chars": len(full_text)
-                }
+                for page_num in range(len(doc)):
+                    # Extract text from the page
+                    page_text = self.extract_text_from_pdf_page(doc, page_num)
+                    
+                    if not page_text:
+                        continue
 
-                vectors_to_upsert.append({
-                    "id": vector_id,
-                    "values": embedding,
-                    "metadata": metadata
-                })
-                
-                print(f"Prepared chunk {i+1}/{len(chunks)} ({len(chunk_text)} chars)")
-                
-            except Exception as e:
-                print(f"Error embedding chunk {i+1}: {e}")
-                continue
-        
-        # Batch upsert all vectors
-        if vectors_to_upsert:
-            try:
-                self.index.upsert(vectors=vectors_to_upsert)
-                print(f"Successfully uploaded {len(vectors_to_upsert)} vectors for house: {self.house_name}")
-            except Exception as e:
-                print(f"Error uploading vectors: {e}")
+                    # Create embedding for the page
+                    embedding = self.create_embedding(page_text)
+                    if not embedding:
+                        continue
 
-    def query_similar(self, query_text: str, top_k: int = 5, house_filter: str = None):
-        """
-        Query for similar content. Can optionally filter by house name.
-        
-        Args:
-            query_text: Text to search for
-            top_k: Number of results to return
-            house_filter: Optional house name to filter results
-        """
+                    # Generate vector ID
+                    sanitized_file_name = self.sanitize_vector_id(file_name)
+                    unique_id = self.generate_unique_id()
+                    vector_id = f"{sanitized_file_name}_{page_num}_{unique_id}"
+                    vector_id = self.sanitize_vector_id(vector_id)
+
+                    # Create metadata
+                    metadata = {
+                        "file_name": os.path.basename(file_path),
+                        "document_name": file_name,
+                        "house_name": house_name,
+                        "page_number": page_num + 1,
+                        "text": page_text[:8000],
+                        "char_count": len(page_text),
+                        "file_type": "pdf"
+                    }
+
+                    vectors_batch.append({
+                        "id": vector_id,
+                        "values": embedding,
+                        "metadata": metadata
+                    })
+                    
+                    if len(vectors_batch) >= batch_size or page_num == len(doc) - 1:
+                        if vectors_batch:
+                            self.index.upsert(vectors=vectors_batch)
+                            print(f"Uploaded batch of {len(vectors_batch)} vectors")
+                            vectors_batch = []
+
+                doc.close()
+                
+            elif file_extension == '.docx':
+                print(f"Processing DOCX {file_path}")
+                
+                # Extract all text from DOCX
+                document_text = self.extract_text_from_docx(file_path)
+                
+                if not document_text:
+                    print(f"Warning: No text extracted from {file_path}")
+                    return
+
+                # For DOCX, we'll chunk the text into smaller pieces since there are no natural pages
+                # Split by double line breaks or every 2000 characters, whichever comes first
+                text_chunks = []
+                paragraphs = document_text.split('\n\n')
+                
+                current_chunk = ""
+                for paragraph in paragraphs:
+                    if len(current_chunk) + len(paragraph) > 2000 and current_chunk:
+                        text_chunks.append(current_chunk.strip())
+                        current_chunk = paragraph
+                    else:
+                        current_chunk += "\n\n" + paragraph if current_chunk else paragraph
+                
+                if current_chunk:
+                    text_chunks.append(current_chunk.strip())
+                
+                # If no good chunks were created, just use the whole text
+                if not text_chunks:
+                    text_chunks = [document_text]
+                
+                vectors_batch = []
+                batch_size = 50
+                
+                for chunk_num, chunk_text in enumerate(text_chunks):
+                    # Create embedding for the chunk
+                    embedding = self.create_embedding(chunk_text)
+                    if not embedding:
+                        continue
+
+                    # Generate vector ID
+                    sanitized_file_name = self.sanitize_vector_id(file_name)
+                    unique_id = self.generate_unique_id()
+                    vector_id = f"{sanitized_file_name}_{chunk_num}_{unique_id}"
+                    vector_id = self.sanitize_vector_id(vector_id)
+
+                    # Create metadata
+                    metadata = {
+                        "file_name": os.path.basename(file_path),
+                        "document_name": file_name,
+                        "house_name": house_name,
+                        "chunk_number": chunk_num + 1,
+                        "text": chunk_text[:8000],
+                        "char_count": len(chunk_text),
+                        "file_type": "docx"
+                    }
+
+                    vectors_batch.append({
+                        "id": vector_id,
+                        "values": embedding,
+                        "metadata": metadata
+                    })
+                    
+                    if len(vectors_batch) >= batch_size or chunk_num == len(text_chunks) - 1:
+                        if vectors_batch:
+                            self.index.upsert(vectors=vectors_batch)
+                            print(f"Uploaded batch of {len(vectors_batch)} vectors")
+                            vectors_batch = []
+            
+            else:
+                print(f"Unsupported file type: {file_extension}")
+                return
+                
+            print(f"Successfully processed document: {file_name}")
+            
+        except Exception as e:
+            print(f"Error processing document {file_path}: {e}")
+            raise
+
+    def query_similar(self, query_text: str, top_k: int = 5):
+        """Query Pinecone for similar documents based on the input text."""
         query_embedding = self.create_embedding(query_text)
-        
-        query_params = {
-            "vector": query_embedding,
-            "top_k": top_k,
-            "include_metadata": True
-        }
-        
-        # Add house filter if specified
-        if house_filter:
-            query_params["filter"] = {"house_name": house_filter}
-        
-        results = self.index.query(**query_params)
+        if not query_embedding:
+            print("Failed to create query embedding")
+            return {"matches": []}
+        results = self.index.query(
+            vector=query_embedding,
+            top_k=top_k,
+            include_metadata=True,
+        )
         return results
 
-    def get_all_chunks_for_house(self, house_name: str = None) -> Dict:
-        """
-        Retrieve all chunks for a specific house (or current house if not specified).
-        """
-        target_house = house_name or self.house_name
-        
-        try:
-            results = self.index.query(
-                vector=[0.0] * 768,  # Dummy vector
-                top_k=10000,  # Large number to get all chunks
-                include_metadata=True,
-                filter={"house_name": target_house}
-            )
-            
-            if results["matches"]:
-                # Sort chunks by chunk_index
-                sorted_chunks = sorted(results["matches"], 
-                                     key=lambda x: x["metadata"].get("chunk_index", 0))
-                return {
-                    "house_name": target_house,
-                    "total_chunks": len(sorted_chunks),
-                    "chunks": sorted_chunks
-                }
-            else:
-                return {"house_name": target_house, "total_chunks": 0, "chunks": []}
-                
-        except Exception as e:
-            print(f"Error retrieving chunks for house {target_house}: {e}")
-            return {"house_name": target_house, "total_chunks": 0, "chunks": []}
 
-    def get_document_stats(self) -> Dict:
-        """Get statistics about the processed document"""
-        try:
-            chunks_info = self.get_all_chunks_for_house()
-            if chunks_info["chunks"]:
-                first_chunk = chunks_info["chunks"][0]["metadata"]
-                return {
-                    "house_name": self.house_name,
-                    "file_name": first_chunk.get("file_name", "Unknown"),
-                    "total_chunks": chunks_info["total_chunks"],
-                    "total_document_chars": first_chunk.get("total_document_chars", 0),
-                    "chunk_size_used": self.chunk_size,
-                    "chunk_overlap_used": self.chunk_overlap
-                }     
+
+    def process_specific_document(self, filename: str, house_name: str, replace_existing: bool = True):
+        """
+        Process a specific PDF or DOCX file from the folder.
+        If replace_existing is True, it will replace any existing vectors for the document with the same name.
+        """
+        file_extension = os.path.splitext(filename)[1].lower()
+        if file_extension in [".pdf", ".docx"]:
+            file_path = os.path.join(self.folder_path, filename)
+            if os.path.exists(file_path):
+                print(f"Processing specific file: {file_path}")
+                self.embed_and_store_document(file_path, house_name=house_name, replace_existing=replace_existing)
             else:
-                return {"error": "No chunks found for this house"}
-        except Exception as e:
-            return {"error": f"Error getting document stats: {e}"}
+                print(f"File not found: {file_path}")
+        else:
+            print(f"Unsupported file type: {filename}")
 
 
 # Example usage
 if __name__ == "__main__":
-    # Example with chunking
-    vectorizer = WordVectorizerGeminiPinecone(
-        file_path="D:\\brindyjean\\House Notes PDF\\HN_ Siesta Pacifica.pdf",
-        pinecone_index_name="house-information-embeddings",
-        house_name="Siesta Pacifica",
-        chunk_size=6000,  # 6000 characters per chunk
-        chunk_overlap=500   # 200 character overlap
+    vectorizer = WordVectorizerOpenAIPinecone(
+        folder_path="D:\\brindyjean\\House Notes PDF",
+        # folder_path="D:\\brindyjean\\House Notes (Internal)",  # Specify the folder containing your PDFs
+        pinecone_index_name="house-information-embeddings"
     )
-    
-    # Process the document with chunking
-    print(f"Processing {vectorizer.file_path}")
-    vectorizer.embed_and_store(vectorizer.file_path)
-    
-    # Get statistics about the processing
-    stats = vectorizer.get_document_stats()
-    print(f"Document Stats: {stats}")
-    
+   
+    # Example : Process a specific PDF file (replacing if it exists)
+    vectorizer.process_specific_document("HN_ Newport Beach 1, 2, 3.pdf",
+                                     house_name = "Newport Beach 1, 2, 3",
+                                     replace_existing=True)
