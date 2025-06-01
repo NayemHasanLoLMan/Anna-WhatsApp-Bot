@@ -1,445 +1,240 @@
+
 import os
 from pinecone import Pinecone
 import google.generativeai as genai
-from typing import List, Dict, Any, Optional, Tuple
-import time
+from typing import List, Dict, Any
+from datetime import datetime, timedelta
 import re
 import json
-from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from rich.console import Console
+from rich.markdown import Markdown
+import openai
+
 
 load_dotenv()
 
-class AnnaAssistant:
+try:
+    has_rich = True
+    console = Console()
+except ImportError:
+    has_rich = False
+
+class AlanaAssistant:
     def __init__(self):
         # API keys from environment variables
         self.PINECONE_API_KEY = os.environ.get('PINECONE_API_KEY')
-        self.GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
-        
-        # Index names
-        self.HOUSE_INDEX_NAME = "house-information-embeddings"
-        self.GUEST_GUIDE_INDEX_NAME = "information-massageing-guide-embeddings"
-        
+        # self.GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
+        self.OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
         # Initialize Pinecone
         self.pc = Pinecone(api_key=self.PINECONE_API_KEY)
-        self.house_index = self.pc.Index(self.HOUSE_INDEX_NAME)
-        self.guest_guide_index = self.pc.Index(self.GUEST_GUIDE_INDEX_NAME)
+        self.house_index = self.pc.Index("brindy-house-test-knowladgebase")
+        self.guest_guide_index = self.pc.Index("brindy-guest-test-knowladgebase")
         
         # Initialize Gemini
-        genai.configure(api_key=self.GOOGLE_API_KEY)
-        self.gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+        # genai.configure(api_key=self.GOOGLE_API_KEY)
+        # self.gemini_model = genai.GenerativeModel('gemini-2.0-flash')
         
-        # Bot state
-        self.current_house = None
+        openai.api_key = self.OPENAI_API_KEY
+        self.embedding_model = "text-embedding-ada-002"  # Updated to newer model
+        self.chat_model = "gpt-4-turbo"  # Updated to newer model
+
+
+        # Reminders storage
+        self.reminders = []
+
+        # Add house name patterns for better extraction
+        self.house_name_patterns = [
+            r'\b(?:for|at|in|about)\s+(?:the\s+)?([a-zA-Z0-9\s]+?)(?:\s+house|\s+property|\?|$)',
+            r'\b([a-zA-Z0-9\s]+?)(?:\s+house|\s+property)',
+            r'^(?:what|how|when|where|tell me about)\s+.*?(?:for|at|in|about)\s+(?:the\s+)?([a-zA-Z0-9\s]+?)(?:\?|$)',
+        ] 
         
-        # Conversation memory
-        self.chat_history = []
+        # Reminder trigger keywords
+        self.reminder_trigger_keywords = ["/note", "/remind", "/reminder"]
+
+
+
+    def extract_house_name(self, query: str) -> str:
+        """Extract house name from user query."""
+        if not query:
+            return None
+            
+        query_clean = query.strip().lower()
         
-        # House information cache
-        self.house_cache = {}
-        self.load_house_names()
-        
-        # Property-related keywords
-        self.property_keywords = [
-            "check-in", "check-out", "amenities", "access", "wi-fi", "password", "rules", 
-            "pets", "smoking", "parking", "location", "neighborhood", "transportation", 
-            "fees", "deposit", "damage", "cleaning", "maintenance", "alarms", "security", 
-            "keys", "codes", "complaints", "issues", "problems", "questions", "information", 
-            "details"
+        # Direct lookup in known houses first (most reliable)
+        known_houses = [
+            '81st way desert rose', 'arcadia', 'camelback casita 63rd pi', 'casa coconino',
+            'elmerville hummingbird crossing', 'granada house', 'heatherbrae 1', 'heatherbrae 23',
+            'kenwood', 'kysar cabin', 'mesa coastal', 'navajo flats', 
+            'newport beach 1, 2, 3', 'paradise', 'siesta pacifica'
         ]
         
-        # Reminder functionality
-        self.reminders = []
-        self.reminder_trigger_keywords = ["/note", "/remind", "/reminder"]
+        # Check for exact matches first
+        for house in known_houses:
+            if house in query_clean:
+                return house.title()
         
-    def embed_text(self, text: str) -> List[float]:
-        """Generate embeddings for text using Gemini with input validation"""
-        # Validate input to prevent empty content errors
-        if not text or not text.strip():
-            print("Warning: Empty input for embedding. Using default query.")
-            text = "rental property information"
-            
-        try:
-            embedding_model = genai.embed_content(
-                model="models/text-embedding-004",
-                content=text,
-                task_type="retrieval_document"
-            )
-            return embedding_model['embedding']
-        except Exception as e:
-            print(f"Error generating embeddings: {e}")
-            # Return zero vector as fallback
-            return [0.0] * 768
-    
-    def update_chat_history(self, role: str, content: str):
-        """Add message to chat history"""
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        self.chat_history.append({
-            "role": role,
-            "content": content,
-            "timestamp": timestamp,
-            "house": self.current_house
-        })
+        # Try pattern matching as fallback - but be more strict
+        for pattern in self.house_name_patterns:
+            matches = re.search(pattern, query_clean, re.IGNORECASE)
+            if matches:
+                house_name = matches.group(1).strip()
+                # Clean up common words
+                house_name = re.sub(r'\b(the|a|an|at|for|to|from|in|on)\b', '', house_name).strip()
+                
+                # Only return if it's a reasonable length and matches known houses
+                if len(house_name) > 2:
+                    # Check if extracted name matches any known house (partial match)
+                    for known_house in known_houses:
+                        # Use more lenient matching for partial names
+                        if (house_name in known_house or 
+                            any(word in known_house for word in house_name.split() if len(word) > 2)):
+                            return known_house.title()
         
-        # Keep only recent history (last 10 messages)
-        if len(self.chat_history) > 10:
-            self.chat_history = self.chat_history[-10:]
-    
-    def detect_house_name(self, query: str) -> Optional[str]:
-        """Enhanced house name detection with improved context preservation"""
-        if not self.house_cache:
-            self.load_house_names()
-        
-        query_lower = query.lower().strip()
-        query_no_space = query_lower.replace(" ", "")
-        
-        # Step 1: Check for explicit house name matches
-        for house_key, house_name in self.house_cache.items():
-            if house_key == query_lower or house_key in query_lower:
-                return house_name
-            if house_key.replace(" ", "") == query_no_space:
-                return house_name
-            if len(house_key) > 4 and (house_key in query_lower or query_lower in house_key):
-                return house_name
-        
-        # Step 2: Handle short or ambiguous inputs by checking conversation history
-        if len(query_lower) <= 3 or query_lower.isdigit():  # For inputs like "23"
-            # Check recent messages for house context
-            for msg in reversed(self.chat_history[-3:]):  # Look at the last 3 messages
-                if msg["house"]:
-                    # If the short input matches part of the last house (e.g., "23" in "Heatherbrae 23")
-                    if query_lower in msg["house"].lower():
-                        return msg["house"]
-            # If no match in history, maintain current house
-            if self.current_house:
-                return self.current_house
-        
-        # Step 3: Maintain current house if no new house is detected
-        if self.current_house:
-            return self.current_house
-        
+        # If no valid house name found, return None
         return None
 
-    def query_vector_db(self, query: str, index, filter_dict: Optional[Dict] = None, top_k: int = 12) -> List[Dict[str, Any]]:
-        """Query specified Pinecone index with filtering options"""
-        query_vector = self.embed_text(query)
-        
+    def embed_text(self, text: str) -> List[float]:
+        """Generate embeddings for text using OpenAI."""
+        if not text or not text.strip():
+            text = "rental property information"
         try:
-            results = index.query(
-                vector=query_vector,
-                top_k=top_k,
-                include_metadata=True,
-                filter=filter_dict
+            response = openai.Embedding.create(
+                model=self.embedding_model,
+                input=text
             )
-            return results.get('matches', [])
+            embedding = response.data[0].embedding
+            return embedding
         except Exception as e:
-            print(f"Error querying index: {e}")
-            return []
-        
-    def fetch_relevant_information(self, query: str) -> Dict[str, Any]:
-        """Unified method to fetch information with better house context handling"""
-        result = {
-            "house_matches": [],
-            "guide_matches": [],
-            "detected_house": None,
-            "house_switch_msg": "",
-            "house_context": "",
-            "guide_context": "",
-            "sources": []
-        }
-        
-        # Detect house name in query
-        detected_house = self.detect_house_name(query)
-        result["detected_house"] = detected_house
-        
-        # Check if query contains property keywords
-        query_lower = query.lower()
-        contains_property_keyword = any(keyword in query_lower for keyword in self.property_keywords)
-        
-        # Fetch house matches only if:
-        # - A house name is detected in the query, or
-        # - The query contains property keywords and a current_house is set
-        if detected_house:
-            self.current_house = detected_house
+            print(f"Error generating embeddings: {e}")
+            return [0.0] * 1536  # embedding size for ada-002
+    
+    def query_vector_db(self, query: str, index, house_name: str = None, top_k: int = 5) -> List[Dict[str, Any]]:
+            """Query Pinecone index with the given query, optionally filtered by house name."""
+            query_vector = self.embed_text(query)
             
-            filter_dict = {"house_name": {"$eq": self.current_house}}
-            result["house_matches"] = self.query_vector_db(query, self.house_index, filter_dict, top_k=15)
-        elif contains_property_keyword and self.current_house:
-            filter_dict = {"house_name": {"$eq": self.current_house}}
-            result["house_matches"] = self.query_vector_db(query, self.house_index, filter_dict, top_k=15)
+            try:
+                # Build the query parameters
+                query_params = {
+                    "vector": query_vector,
+                    "top_k": top_k * 2,  # Get more results for better filtering
+                    "include_metadata": True
+                }
+                
+                # Query without filter first (since exact matching might be tricky)
+                results = index.query(**query_params)
+                matches = results.get('matches', [])
+                
+                # If house name is provided, filter results manually for better control
+                if house_name and matches:
+                    filtered_matches = []
+                    house_name_lower = house_name.lower()
+                    
+                    for match in matches:
+                        metadata = match.get('metadata', {})
+                        stored_house_name = metadata.get('house_name', '').lower()
+                        file_name = metadata.get('file_name', '').lower()
+                        
+                        # Multiple matching strategies
+                        match_found = False
+                        
+                        # Strategy 1: Exact match
+                        if stored_house_name == house_name_lower:
+                            match_found = True
+                        
+                        # Strategy 2: Check if query house name is contained in stored name
+                        elif house_name_lower in stored_house_name:
+                            match_found = True
+                        
+                        # Strategy 3: Check if stored name is contained in query house name
+                        elif stored_house_name in house_name_lower:
+                            match_found = True
+                        
+                        # Strategy 4: Word-by-word matching for compound names
+                        elif any(word in stored_house_name for word in house_name_lower.split() if len(word) > 2):
+                            match_found = True
+                        
+                        # Strategy 5: Check filename pattern (fallback)
+                        elif house_name_lower.replace(' ', '') in file_name.replace(' ', '').replace('_', ''):
+                            match_found = True
+                        
+                        if match_found:
+                            filtered_matches.append(match)
+                    
+                    return filtered_matches[:top_k]
+                
+                return matches[:top_k]
+                
+            except Exception as e:
+                print(f"Error querying index: {e}")
+                return []
+    
+    def format_matches(self, matches: List[Dict], query: str, house_name: str = None) -> str:
+        """Format matches into a context string with house identification."""
+        if not matches:
+            if house_name:
+                return f"No relevant information found for {house_name}."
+            return "No relevant information found."
         
-        # Always fetch guide matches
-        result["guide_matches"] = self.query_vector_db(query, self.guest_guide_index, None, top_k=15)
-        
-        # Format contexts
-        if result["house_matches"]:
-            result["house_context"], result["sources"] = self.format_house_matches(result["house_matches"])
-        
-        if result["guide_matches"]:
-            result["guide_context"] = self.format_guest_guide_matches(result["guide_matches"], query)
-        
-        return result
-
-    def format_house_matches(self, matches: List[Dict]) -> Tuple[str, List[str]]:
-        """Format house info matches into context string and source references"""
-        context_chunks = []
-        sources = []
-        
+        context = []
         for match in matches:
-            document_name = match['metadata'].get('file_name', 'Unknown document')
             text = match['metadata'].get('text', '')
-            house_name = match['metadata'].get('house_name', 'Unknown house')
+            source = match['metadata'].get('file_name', 'Unknown document')
+            house_from_metadata = match['metadata'].get('house_name', '')
             
             if text:
-                context_chunks.append(f"[Source: {document_name}, House: {house_name}]\n{text}")
-                if document_name not in sources:
-                    sources.append(f"{document_name} (House: {house_name})")
+                # Use the house name from metadata for clarity
+                house_identifier = house_from_metadata if house_from_metadata else "Unknown Property"
+                context.append(f"[Property: {house_identifier}]\n{text}")
         
-        return "\n\n".join(context_chunks), sources
+        return "\n\n".join(context)
     
-    def format_guest_guide_matches(self, matches: List[Dict], query: str = "") -> str:
-        """Format guest guide matches with query-specific prioritization"""
-        # Extract templates, tone guidelines, and general information
-        templates = []
-        tone_guidelines = []
-        general_info = []
+    def format_conversation_history(self, conversation_history: List[Dict[str, str]]) -> str:
+        """Format conversation history for inclusion in the prompt."""
+        if not conversation_history:
+            return ""
         
-        seen_content = set()
-        query_lower = query.lower()
+        formatted_history = []
+        for message in conversation_history:
+            role = message.get('role', '').capitalize()
+            content = message.get('content', '')
+            if role and content:
+                formatted_history.append(f"{role}: {content}")
         
-        for match in matches:
-            text = match['metadata'].get('text', '').strip()
-            if not text or text[:100] in seen_content:
-                continue
-            seen_content.add(text[:100])
-            lower_text = text.lower()
-            
-            # Categorize based on content markers
-            if any(marker in lower_text for marker in ["template", "example", "sample", "message"]) or \
-               any(marker in text for marker in ["$", "[", "]", "{", "}"]):
-                templates.append({"text": text, "score": match['score']})
-            elif any(marker in lower_text for marker in ["tone", "voice", "brand", "persona"]):
-                tone_guidelines.append({"text": text, "score": match['score']})
-            else:
-                general_info.append({"text": text, "score": match['score']})
-        
-        # Determine query intent to prioritize sections
-        is_drafting_message = any(keyword in query_lower for keyword in ["draft", "message", "respond", "reply"])
-        is_policy_guidance = any(keyword in query_lower for keyword in ["book", "policy", "contact", "directly"])
-        
-        # Sort by relevance score
-        templates.sort(key=lambda x: x['score'], reverse=True)
-        tone_guidelines.sort(key=lambda x: x['score'], reverse=True)
-        general_info.sort(key=lambda x: x['score'], reverse=True)
-        
-        # Build formatted context based on query intent
-        formatted_text = ""
-        
-        if is_drafting_message:
-            # Prioritize templates and tone for drafting messages
-            if templates:
-                formatted_text += "## MESSAGE TEMPLATES & EXAMPLES (Use these for drafting):\n\n"
-                for item in templates[:3]:  # Limit to top 3 most relevant
-                    formatted_text += f"{item['text']}\n\n"
-            if tone_guidelines:
-                formatted_text += "## MESSAGING TONE & BRAND GUIDELINES (Follow this tone):\n\n"
-                for item in tone_guidelines[:2]:  # Limit to top 2
-                    formatted_text += f"{item['text']}\n\n"
-            if general_info:
-                formatted_text += "## GENERAL MESSAGING GUIDELINES (Additional context):\n\n"
-                for item in general_info[:2]:
-                    formatted_text += f"{item['text']}\n\n"
-        
-        elif is_policy_guidance:
-            # Prioritize tone and general guidelines for policy-related queries
-            if tone_guidelines:
-                formatted_text += "## MESSAGING TONE & BRAND GUIDELINES (Follow this tone):\n\n"
-                for item in tone_guidelines[:2]:
-                    formatted_text += f"{item['text']}\n\n"
-            if general_info:
-                formatted_text += "## GENERAL MESSAGING GUIDELINES (Use for policy guidance):\n\n"
-                for item in general_info[:3]:
-                    formatted_text += f"{item['text']}\n\n"
-            if templates:
-                formatted_text += "## MESSAGE TEMPLATES & EXAMPLES (Optional for reference):\n\n"
-                for item in templates[:2]:
-                    formatted_text += f"{item['text']}\n\n"
-        
-        else:
-            # Default ordering for other queries
-            if tone_guidelines:
-                formatted_text += "## MESSAGING TONE & BRAND GUIDELINES:\n\n"
-                for item in tone_guidelines[:2]:
-                    formatted_text += f"{item['text']}\n\n"
-            if templates:
-                formatted_text += "## MESSAGE TEMPLATES & EXAMPLES:\n\n"
-                for item in templates[:3]:
-                    formatted_text += f"{item['text']}\n\n"
-            if general_info:
-                formatted_text += "## GENERAL MESSAGING GUIDELINES:\n\n"
-                for item in general_info[:2]:
-                    formatted_text += f"{item['text']}\n\n"
-        
-        return formatted_text
-
-    def load_house_names(self):
-        """Pre-load house names at startup"""
-        try:
-            print("Loading house names...")
-            # Query index with a dummy vector to get metadata
-            dummy_vector = [0.0] * 768
-            results = self.house_index.query(vector=dummy_vector, top_k=100, include_metadata=True)
-            
-            # Extract unique house names
-            houses_found = 0
-            for match in results.get('matches', []):
-                house_name = match['metadata'].get('house_name')
-                if house_name and house_name != "Unknown" and house_name.lower() not in self.house_cache:
-                    self.house_cache[house_name.lower()] = house_name
-                    houses_found += 1
-                    
-                    # Also store without spaces and special characters
-                    no_space = house_name.lower().replace(" ", "")
-                    self.house_cache[no_space] = house_name
-                    
-                    simple_name = re.sub(r'[^a-zA-Z0-9]', '', house_name.lower())
-                    if simple_name != house_name.lower():
-                        self.house_cache[simple_name] = house_name
-            
-            print(f"Loaded {houses_found} unique houses into cache")
-            return houses_found > 0
-        except Exception as e:
-            print(f"Error loading house names: {e}")
-            return False
+        return "\n".join(formatted_history)
     
-    def format_chat_history(self) -> str:
-        """Format chat history for context"""
-        formatted = []
-        for msg in self.chat_history:
-            role = "Employee" if msg["role"] == "user" else "Anna"
-            formatted.append(f"{role}: {msg['content']}")
-        
-        return "\n".join(formatted)
-    
-    def generate_response(self, user_input: str) -> str:
-        """Unified response generation with strict adherence to messaging guide"""
-        # Check if this is a reminder request
-        if self.is_reminder_request(user_input):
-            return self.process_reminder(user_input)
-            
-        info = self.fetch_relevant_information(user_input)
-        
-        house_context = info["house_context"]
-        house_name = info["detected_house"] if info["detected_house"] else "the property"
-        guide_context = info["guide_context"]
-        formatted_history = self.format_chat_history()
-        
-        prompt = f"""You are Anna, a helpful AI assistant for property management employees. Your role is to provide accurate, tailored responses based on the provided property details, messaging guidelines, and your general knowledge. Use the context to craft clear, specific, and explanatory answers that directly address the employee's query without quoting or reproducing raw information from the context. Synthesize the information to provide natural, colleague-like responses that include relevant context and explanations.
-
-            EMPLOYEE QUERY: {user_input}
-
-            Recent conversation:
-            {formatted_history}
-
-            INSTRUCTIONS:
-            1. Analyze the query to identify the employee's needs (e.g., drafting a message, seeking property details, or requesting communication guidance).
-            2. For property-related queries, extract specific details from PROPERTY INFORMATION and present them clearly and concisely. Interpret terms like 'structure,' 'layout,' or 'rooms' as referring to the physical attributes of the house (e.g., floor plan, number of bedrooms, bathrooms) unless otherwise specified.
-            3. If no relevant information is found in PROPERTY INFORMATION for a property-related query, explicitly state that no information is available for the requested details (e.g., 'No information is available about the layout of {house_name}.').
-            4. For communication tasks (e.g., drafting messages or providing tone advice), strictly adhere to the tone, structure, and content specified in the MESSAGING GUIDELINES. Explain why the chosen tone or structure is appropriate, referencing the guidelines implicitly.
-            5. When drafting messages, adapt MESSAGE TEMPLATES & EXAMPLES to the specific context (e.g., property name, issue), and provide a brief explanation of how the message aligns with the guidelines.
-            6. If the query is ambiguous (e.g., unclear intent or multiple possible interpretations), ask clarifying questions, using PROPERTY INFORMATION or recent conversation to inform the clarification (e.g., 'Are you asking about the layout of {house_name} or something else?').
-            7. Incorporate relevant background or situational context to make responses more comprehensive, but keep them focused and professional.
-            8. Do not invent information beyond what is provided in the context or your knowledge.
-            9. Maintain a helpful, colleague-like tone, avoiding overly formal or robotic language.
-            10. Ensure responses are concise, precise, and directly address the query without unnecessary details.
-            11. If no specific property information is available for a house-related query, prioritize general guidelines from the MESSAGING GUIDELINES section to provide a helpful response based on standard practices.
-            12. For house related quries, don't give all the information at once. Instead, provide a summary of the most relevant details and offer to provide more information if needed.
-            13. Answare precisely and avoid unnecessary repetition or filler content.
-            14. for general queries, provide a summary of the most relevant details and offer to provide more information if needed.
-            15. if no house name is given within the query use general massage templates and examples to provide a helpful response based on standard practices.
-
-
-
-            PROPERTY INFORMATION ({house_name}):
-            {house_context if house_context.strip() else "No specific property information available for this query."}
-
-            MESSAGING GUIDELINES:
-            {guide_context if guide_context.strip() else "No specific messaging guidelines available for this query."}
-
-            Provide a response that addresses the employee's needs, weaving in relevant context and explanations while strictly adhering to the messaging guidelines for communication-related tasks:"""
-
-        try:
-            response = self.gemini_model.generate_content(prompt)
-            answer = response.text
-            
-            # Add house switch message if needed
-            if info["house_switch_msg"]:
-                answer = f"{info['house_switch_msg']}\n\n{answer}"
-            
-            return answer
-        except Exception as e:
-            return f"I'm sorry, I encountered an error processing your request: {str(e)}"
-    
-    # Updated and improved reminder functionality methods
     def is_reminder_request(self, user_input: str) -> bool:
-        """Check if the query is a reminder request"""
+        """Check if the query is a reminder request."""
         user_input_lower = user_input.lower().strip()
-        
-        # Check for trigger keywords at the beginning of the message
         for keyword in self.reminder_trigger_keywords:
             if user_input_lower.startswith(keyword):
                 return True
-                
-        # Check for reminder phrases
         reminder_phrases = [
-            "remind me", 
-            "set a reminder", 
-            "create a reminder",
-            "set a note",
-            "make a note",
-            "add a reminder"
+            "remind me", "set a reminder", "create a reminder",
+            "set a note", "make a note", "add a reminder"
         ]
-        
-        for phrase in reminder_phrases:
-            if phrase in user_input_lower:
-                return True
-                
-        return False
-        
+        return any(phrase in user_input_lower for phrase in reminder_phrases)
+    
     def parse_reminder_time(self, text: str) -> tuple:
-        """
-        Extract time and date information from natural language text with improved pattern recognition
-        Returns a tuple of (date_str, time_str, natural_date)
-        """
+        """Extract time and date from natural language text."""
         text_lower = text.lower()
-        print(f"Parsing reminder time from: '{text_lower}'")  # Debug logging
         
-        # Extract specified time (enhanced patterns)
+        # Time patterns
         time_patterns = [
-            r'(\d{1,2})[\.:](\d{2})(?:\s*([ap]m))?',      # matches "5:00", "5.00", "5:00 am"
-            r'(\d{1,2})\s*([ap]m)',                       # matches "5 am", "5am", "5 pm"
-            r'at\s+(\d{1,2})(?:[\.:](\d{2}))?(?:\s*([ap]m))?'  # matches "at 5", "at 5:00", "at 5.00"
+            r'(\d{1,2})[\.:](\d{2})(?:\s*([ap]m))?',
+            r'(\d{1,2})\s*([ap]m)',
+            r'at\s+(\d{1,2})(?:[\.:](\d{2}))?(?:\s*([ap]m))?'
         ]
-        
         time_str = None
         for pattern in time_patterns:
             matches = re.search(pattern, text_lower)
             if matches:
                 groups = matches.groups()
-                
-                # Handle hour
                 hour = int(groups[0])
-                
-                # Handle minutes if present, otherwise default to 0
-                minutes = 0
-                if len(groups) > 1 and groups[1] and groups[1].isdigit():
-                    minutes = int(groups[1])
-                
-                # Check for PM/AM in the matched groups and surrounding context
+                minutes = 0 if len(groups) < 2 or not groups[1] or not groups[1].isdigit() else int(groups[1])
                 is_pm = False
                 is_am = False
-                
-                # Check the actual match for AM/PM
                 for g in groups:
                     if g and isinstance(g, str):
                         if "pm" in g.lower():
@@ -448,151 +243,90 @@ class AnnaAssistant:
                         elif "am" in g.lower():
                             is_am = True
                             break
-                
-                # If not found in groups, check surrounding context
                 if not is_pm and not is_am:
-                    # Get the entire sentence or segment containing the time
-                    sentence_pattern = r'[^.!?]*' + re.escape(matches.group(0)) + r'[^.!?]*'
-                    sentence_match = re.search(sentence_pattern, text_lower)
-                    
-                    if sentence_match:
-                        context = sentence_match.group(0)
-                        if "pm" in context or "p.m" in context or "evening" in context:
+                    context = re.search(r'[^.!?]*' + re.escape(matches.group(0)) + r'[^.!?]*', text_lower)
+                    if context:
+                        context = context.group(0)
+                        if "pm" in context or "evening" in context:
                             is_pm = True
-                        elif "am" in context or "a.m" in context or "morning" in context:
+                        elif "am" in context or "morning" in context:
                             is_am = True
-                
-                # Apply AM/PM conversion
                 if is_pm and hour < 12:
                     hour += 12
                 elif is_am and hour == 12:
-                    hour = 0  # Convert 12 AM to 00 hours
-                
+                    hour = 0
                 time_str = f"{hour:02d}:{minutes:02d}"
-                print(f"Extracted time: {hour}:{minutes:02d} (is_pm: {is_pm}, is_am: {is_am})")
                 break
         
-        # Date extraction with enhanced pattern recognition
+        # Date extraction
         now = datetime.now()
-        date_str = "today"  # Default to today
-        natural_date = now.strftime("%Y-%m-%d")  # Default formatted date
+        date_str = "today"
+        natural_date = now.strftime("%Y-%m-%d")
         
-        # Dictionary of month names to month numbers
         month_names = {
-            "january": 1, "jan": 1,
-            "february": 2, "feb": 2,
-            "march": 3, "mar": 3,
-            "april": 4, "apr": 4,
-            "may": 5,
-            "june": 6, "jun": 6,
-            "july": 7, "jul": 7,
-            "august": 8, "aug": 8,
-            "september": 9, "sep": 9, "sept": 9,
-            "october": 10, "oct": 10,
-            "november": 11, "nov": 11,
-            "december": 12, "dec": 12
+            "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+            "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+            "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9,
+            "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12
         }
         
-        # First, check for ordinal dates like "23rd of May" - prioritize this pattern
-        ordinal_date_pattern = r'(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(' + '|'.join(list(month_names.keys())) + r')'
-        ordinal_match = re.search(ordinal_date_pattern, text_lower)
+        # Handle common misspellings like "toay" for "today"
+        if "toay" in text_lower or "today" in text_lower:
+            date_str = "today"
+            natural_date = now.strftime("%Y-%m-%d")
+        elif "tomorrow" in text_lower or "tommorow" in text_lower:
+            date_str = "tomorrow"
+            natural_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
         
+        ordinal_date_pattern = r'(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(' + '|'.join(month_names.keys()) + r')'
+        ordinal_match = re.search(ordinal_date_pattern, text_lower)
         if ordinal_match:
             day_num, month_name = ordinal_match.groups()
             month_num = month_names[month_name]
             day_num = int(day_num)
-            
-            # Set year (current or next if the date has passed)
             target_year = now.year
             if (month_num < now.month) or (month_num == now.month and day_num < now.day):
                 target_year += 1
-                
             specific_date = datetime(target_year, month_num, day_num)
             date_str = f"on {month_name} {day_num}"
             natural_date = specific_date.strftime("%Y-%m-%d")
-            
-            # If no time was found, set a default based on context
-            if not time_str:
-                if "morning" in text_lower:
-                    time_str = "09:00"
-                elif "afternoon" in text_lower:
-                    time_str = "14:00"
-                elif "evening" in text_lower or "tonight" in text_lower:
-                    time_str = "19:00"
-                else:
-                    time_str = "09:00"  # Default to 9 AM
-                    
-            print(f"Parsed date from ordinal: {natural_date}, display: {date_str}")
-            
-        # Handle "today", "tomorrow", "next week" patterns
-        elif "today" in text_lower or "toay" in text_lower:  # Handle common misspelling
-            date_str = "today"
-            natural_date = now.strftime("%Y-%m-%d")
-            print(f"Parsed date as today: {natural_date}")
         
-        elif "tomorrow" in text_lower or "tommorow" in text_lower:  # Handle common misspelling
-            date_str = "tomorrow"
-            natural_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
-            print(f"Parsed date as tomorrow: {natural_date}")
-        
-        # Dictionary of day names to weekday numbers (0=Monday, 6=Sunday)
         days_of_week = {
-            "monday": 0, "mon": 0,
-            "tuesday": 1, "tue": 1, "tues": 1,
-            "wednesday": 2, "wed": 2,
-            "thursday": 3, "thu": 3, "thurs": 3,
-            "friday": 4, "fri": 4,
-            "saturday": 5, "sat": 5,
-            "sunday": 6, "sun": 6
+            "monday": 0, "mon": 0, "tuesday": 1, "tue": 1, "tues": 1,
+            "wednesday": 2, "wed": 2, "thursday": 3, "thu": 3, "thurs": 3,
+            "friday": 4, "fri": 4, "saturday": 5, "sat": 5, "sunday": 6, "sun": 6
         }
-        
-        # Handle day names (e.g., "on Monday", "this Friday")
         for day_name, day_num in days_of_week.items():
             if day_name in text_lower:
-                # Calculate days until the next occurrence of this weekday
                 current_weekday = now.weekday()
                 days_until = (day_num - current_weekday) % 7
-                
-                # If we're referring to a day that's already past this week
                 if days_until == 0 and "next" in text_lower:
-                    days_until = 7  # Next week's same day
+                    days_until = 7
                 elif days_until == 0:
-                    days_until = 7  # Default to next week if the day is today
-                
+                    days_until = 7
                 target_date = now + timedelta(days=days_until)
                 date_str = f"on {day_name}"
                 natural_date = target_date.strftime("%Y-%m-%d")
-                print(f"Parsed date from day name: {natural_date}, display: {date_str}")
                 break
         
-        # Handle "next week" patterns
         if "next week" in text_lower:
-            # Default to next Monday if day not specified
             next_monday = now + timedelta(days=(7 - now.weekday()))
             date_str = "next week"
             natural_date = next_monday.strftime("%Y-%m-%d")
-            print(f"Parsed date as next week: {natural_date}")
         
-        # Handle specific date formats like "on May 15"
         specific_date_pattern = r'(?:on\s+)?(' + '|'.join(month_names.keys()) + r')\s+(\d{1,2})(?:st|nd|rd|th)?'
         date_match = re.search(specific_date_pattern, text_lower)
-        
         if date_match:
             month_name, day = date_match.groups()
             month_num = month_names[month_name]
             day_num = int(day)
-            
-            # Set year (current or next if the date has passed)
             target_year = now.year
             if (month_num < now.month) or (month_num == now.month and day_num < now.day):
                 target_year += 1
-                
             specific_date = datetime(target_year, month_num, day_num)
             date_str = f"on {month_name} {day}"
             natural_date = specific_date.strftime("%Y-%m-%d")
-            print(f"Parsed date from month-day: {natural_date}, display: {date_str}")
         
-        # If no time was found, set a default based on context
         if not time_str:
             if "morning" in text_lower:
                 time_str = "09:00"
@@ -601,305 +335,432 @@ class AnnaAssistant:
             elif "evening" in text_lower or "tonight" in text_lower:
                 time_str = "19:00"
             else:
-                time_str = "09:00"  # Default to 9 AM
-            print(f"Using default time: {time_str}")
+                time_str = "09:00"
         
-        print(f"Final parsed time: {time_str}, date: {natural_date}, display: {date_str}")
         return date_str, time_str, natural_date
     
-    def extract_reminder_content(self, text: str) -> str:
-        """Extract the actual reminder content/task from the input"""
-        # Remove trigger keywords
+    def extract_reminder_content(self, text: str, conversation_history=None) -> str:
+        """Extract the actual reminder content from the input, optionally using conversation history for context."""
         content = text
+        
+        # Remove command triggers first
         for keyword in self.reminder_trigger_keywords:
             if content.lower().startswith(keyword.lower()):
                 content = content[len(keyword):].strip()
                 break
         
-        # Remove time references
+        # Remove time-related phrases - expanded list of patterns
         time_phrases = [
-            r'at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?',
-            r'\d{1,2}(?::\d{2})?\s*(?:am|pm)',
-            r'this\s+(?:morning|afternoon|evening)',
-            r'tomorrow(?:\s+morning|\s+afternoon|\s+evening)?',
-            r'next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)',
+            r'(?:for|on)\s+(?:today|toay|tomorrow|tommorow)',
+            r'at\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?',
+            r'\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)',
+            r'this\s+(?:morning|afternoon|evening|night)',
+            r'(?:tomorrow|tommorow)(?:\s+morning|\s+afternoon|\s+evening|\s+night)?',
+            r'next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|week)',
             r'on\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)',
-            r'next\s+week',
-            r'remind\s+me',
+            r'(?:remind|reminder|note)\s+(?:me|for|to)',
             r'set\s+a\s+reminder',
             r'create\s+a\s+reminder',
             r'make\s+a\s+note'
         ]
         
+        # Apply each pattern sequentially
         for phrase in time_phrases:
             content = re.sub(phrase, '', content, flags=re.IGNORECASE)
         
-        # Clean up content
+        # Remove phrases like "for me to" or "for me"
+        content = re.sub(r'for\s+me\s+to', '', content, flags=re.IGNORECASE)
+        content = re.sub(r'for\s+me', '', content, flags=re.IGNORECASE)
+        
+        # Clean up whitespace, including multiple spaces and leading/trailing spaces
         content = re.sub(r'\s+', ' ', content).strip()
         
-        # If the content starts with common action words, keep them
-        # Otherwise, if needed, add a starter phrase to make it a complete note
-        if not content:
-            return "General reminder"
-        return content
+        # Remove any leading conjunctions or prepositions that might be leftover
+        content = re.sub(r'^(?:to|and|that|for|about)\s+', '', content, flags=re.IGNORECASE)
+        
+        # If content is empty or too short, try to extract context from conversation history
+        if not content or len(content) < 3:
+            if conversation_history and len(conversation_history) > 0:
+                # Look for context in the last message from the assistant
+                for message in reversed(conversation_history):
+                    if message.get('role') == 'assistant':
+                        assistant_msg = message.get('content', '')
+                        # Extract the main topic from the assistant's message
+                        key_phrases = re.findall(r'(?:for|about|regarding|on)\s+(.*?)(?:\.|\!|\?|$)', assistant_msg)
+                        if key_phrases:
+                            content = key_phrases[0].strip()
+                            break
+        
+        return content if content else "General reminder"
     
     def generate_ai_reminder_message(self, raw_content: str, date_str: str, time_str: str) -> str:
-        """Use Gemini AI to generate a professional reminder message"""
+        """Generate a professional reminder message using Gemini."""
         try:
-            # Extract time info for context
             hour, minute = map(int, time_str.split(':'))
             am_pm = "AM" if hour < 12 else "PM"
-            display_hour = hour % 12
-            if display_hour == 0:
-                display_hour = 12
+            display_hour = hour % 12 or 12
             formatted_time = f"{display_hour}:{minute:02d} {am_pm}"
             
-            # Create prompt for Gemini
             prompt = f"""
-            Please format the following reminder content into a professional, well-structured reminder message:
-            
-            Original reminder: "{raw_content}"
-            Time: {formatted_time}
-            Date: {date_str}
-            
-            Requirements:
-            1. Create a bold title that captures the main purpose (use ** for bold)
-            2. Write a concise, professional body with relevant details
-            3. Include an appropriate closing phrase
-            4. Keep the message friendly and professional
-            5. Format as a short, clear paragraph (2-3 sentences maximum)
-            6. Start with the title on its own line, followed by the message body
-            7. Don't explicitly mention this is an "AI-generated" reminder
-            8. Don't include timestamps, references to "original reminder", or meta-information
-            
-            Example format:
-            **Maintenance Appointment**
-            Your maintenance appointment is scheduled as planned. Please have all necessary documents ready. Have a productive day!
-            """
-            
-            # Generate the formatted message
-            response = self.gemini_model.generate_content(prompt)
-            formatted_message = response.text.strip()
-            
-            # Fallback in case of AI failure
-            if not formatted_message or len(formatted_message) < 10:
-                return f"**Reminder**\n{raw_content}"
+                Create a brief notification message for the following reminder. 
+                This message WILL BE DELIVERED at the scheduled time, so write it accordingly:
+        
                 
-            return formatted_message
+                Task/Reminder: "{raw_content}"
+                
+                Requirements:
+                1. Create a bold, attention-grabbing title that clearly identifies what the reminder is for (use * for bold in WhatsApp Markdown)
+                2. Write the body in future tense (e.g., "Your meeting will begin in 30 minutes")
+                3. Include specific details from the original reminder content
+                4. Keep the message friendly, concise, and actionable (2-3 sentences maximum)
+                5. Format as a short notification compatible with WhatsApp
+                6. Include a gentle call-to-action or helpful tip related to the reminder when appropriate
+                7. Write as if this message will appear as a notification at the scheduled time
+                8. Start with the title on its own line, followed by the message body
+                9. Use WhatsApp Markdown formatting as specified below
+
+                WHATSAPP MARKDOWN FORMATTING:
+                - Use `*text*` for bold text to highlight key points, headings, or important terms (e.g., `*Check-in Time*`)
+                - Use `_text_` for italic text to emphasize specific details or add a friendly tone (e.g., `_Happy to help!_`)
+                - Use `~text~` for strikethrough if indicating something is no longer relevant (e.g., `~Old code: 1234~`)
+                - Use triple backticks (```) for code blocks when sharing technical details like access codes or JSON data (e.g., ```Code: 1234```)
+                - Use plain text with `-` for bullet points to list information clearly (e.g., `- Item 1\n- Item 2`)
+                - Use newlines (`\n`) to separate sections or paragraphs for readability
+                - Avoid unsupported Markdown like tables, blockquotes, or links (e.g., `[text](url)`). For links, provide the URL as plain text
+
+                Example format for a meeting reminder:
+                *Team Meeting Reminder*\n
+                Your scheduled team meeting will begin in 30 minutes. Please have your quarterly report ready to share with the group.
+
+                Example format for a task reminder:
+                *Property Inspection Due*\n
+                Time to complete the scheduled inspection for 123 Main Street. Remember to bring the updated checklist and take photos as required.
+                """
             
+            response = openai.ChatCompletion.create(
+            model=self.chat_model,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant creating reminder notifications."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=200,
+            temperature=0.7,
+            n=1,
+        )
+            formatted_message = response.choices[0].message['content'].strip()
+            if not formatted_message or len(formatted_message) < 10:
+                return f"*Reminder*\n{raw_content}"
+            return formatted_message
         except Exception as e:
             print(f"Error generating AI reminder message: {e}")
-            # Fallback in case of error
             return f"**Reminder**\n{raw_content}"
     
-    def process_reminder(self, user_input: str) -> str:
-        """Process reminder request and generate appropriate response with AI-enhanced formatting"""
-        # Parse reminder details
+    def process_reminder(self, user_input: str, conversation_history=None) -> Dict[str, Any]:
+        """Process a reminder request and generate response."""
+        # Store original content before any processing
+        original_content = user_input.strip()
+        
+        # Extract time and date information
         date_str, time_str, natural_date = self.parse_reminder_time(user_input)
         
-        # Extract reminder content (the basic content)
-        raw_content = self.extract_reminder_content(user_input)
+        # Extract the reminder content - we'll keep it separate from raw_content
+        reminder_content = self.extract_reminder_content(user_input, conversation_history)
         
-        # Generate AI-formatted message
-        formatted_message = self.generate_ai_reminder_message(raw_content, date_str, time_str)
-        
-        # Format time for the reminder
         hour, minute = map(int, time_str.split(':'))
         reminder_time = f"{hour:02d}:{minute:02d}"
         
-        # Create the reminder JSON
+        # Format time for display
+        am_pm = "AM" if hour < 12 else "PM"
+        display_hour = hour % 12 or 12
+        formatted_time = f"{display_hour}:{minute:02d} {am_pm}"
+        
+        # Format date for display
+        reminder_date = datetime.strptime(natural_date, "%Y-%m-%d").date()
+        today = datetime.now().date()
+        date_display = "today" if reminder_date == today else "tomorrow" if reminder_date == today + timedelta(days=1) else reminder_date.strftime("%A, %B %d")
+        
+        # Generate the message
+        formatted_message = self.generate_ai_reminder_message(reminder_content, date_str, time_str)
+        
+        # Create the reminder object with the full original content
         reminder = {
             "send_to": "self",
             "time": reminder_time,
             "date": natural_date,
-            "message": formatted_message
+            "message": formatted_message,
+            "raw_content": original_content  # Store the complete original message
         }
         
-        # Store this reminder for future reference
-        self.reminders.append(reminder)
-        
-        # Format time for response
-        am_pm = "AM" if hour < 12 else "PM"
-        display_hour = hour % 12
-        if display_hour == 0:
-            display_hour = 12
+        # Try to save the reminder
+        try:
+            self.reminders.append(reminder)
             
-        formatted_time = f"{display_hour}:{minute:02d} {am_pm}"
-        
-        # Parse the date for display
-        reminder_date = datetime.strptime(reminder["date"], "%Y-%m-%d").date()
-        today = datetime.now().date()
-        
-        if reminder_date == today:
-            date_display = "today"
-        elif reminder_date == today + timedelta(days=1):
-            date_display = "tomorrow"
-        else:
-            # Format as weekday, Month Day
-            date_display = reminder_date.strftime("%A, %B %d")
-        
-        # Generate response message
-        response = f"I've set a reminder for {date_display} at {formatted_time}.\n" 
-        
-        
-        # Add JSON for debugging or API integration
-        reminder_json = json.dumps(reminder, indent=2)
-        response += f"\n\nReminder details:\n```json\n{reminder_json}\n```"
-          
-        return response
-    
-    def process_query(self, user_input: str) -> str:
-        """Main query processing function"""
-        # Generate response
-        response = self.generate_response(user_input)
-        
-        # Update chat history
-        self.update_chat_history("user", user_input)
-        self.update_chat_history("assistant", response)
-        
-        return response
-    
-    def chat(self):
-        """Interactive chat loop"""
-        print("Anna: Hello! I'm Anna, your property assistant. I am here to help you find information about properties and messaging guidelines.")
-        
-        while True:
-            user_input = input("\nYou: ").strip()
+            # Create a clean user message - simpler confirmation without the details
+            user_message = f"✅ I've set a reminder for you for {date_display} at {formatted_time}."
             
-            if user_input.lower() == '/exit':
-                print("Anna: Goodbye!")
-                break
-                
-            # Generate and display response
-            start_time = time.time()
-            response = self.process_query(user_input)
-            end_time = time.time()
-            
-            print(f"\nAnna: {response}")
-            print(f"[Response time: {end_time - start_time:.2f}s]")
-
-
-
-def process_backend_query(conversation_history: list, user_input: str) -> dict:
-    """
-    Process a query from the backend API, with support for conversation history.
-    
-    Args:
-        conversation_history: List of message dictionaries with 'role' and 'content' keys
-                              where role is either 'user' or 'assistant'
-        user_input: The current user message
-    
-    Returns:
-        Dictionary containing:
-            - 'response': The assistant's response text (without JSON details for reminders)
-            - 'is_reminder': Boolean indicating if this is a reminder
-            - 'reminder_data': JSON reminder data (if applicable, else None)
-    """
-    try:
-        # Initialize the assistant
-        assistant = AnnaAssistant()
-        
-        # Load conversation history
-        for message in conversation_history:
-            if 'role' in message and 'content' in message:
-                assistant.update_chat_history(message['role'], message['content'])
-        
-        # Check if this is a reminder request
-        is_reminder = assistant.is_reminder_request(user_input)
-        reminder_data = None
-        
-        if is_reminder:
-            # Parse reminder details
-            date_str, time_str, natural_date = assistant.parse_reminder_time(user_input)
-            
-            # Extract reminder content
-            raw_content = assistant.extract_reminder_content(user_input)
-            
-            # Generate AI-formatted message
-            formatted_message = assistant.generate_ai_reminder_message(raw_content, date_str, time_str)
-            
-            # Format time for the reminder
-            hour, minute = map(int, time_str.split(':'))
-            reminder_time = f"{hour:02d}:{minute:02d}"
-            
-            # Create the reminder data
-            reminder_data = {
-                "send_to": "self",
-                "time": reminder_time,
-                "date": natural_date,
-                "message": formatted_message
+            return {
+                "response": user_message,
+                "is_reminder": True,
+                "reminder_data": reminder,
+                "status": "success"
             }
-            
-            # Format time for response
-            am_pm = "AM" if hour < 12 else "PM"
-            display_hour = hour % 12
-            if display_hour == 0:
-                display_hour = 12
-                
-            formatted_time = f"{display_hour}:{minute:02d} {am_pm}"
-            
-            # Parse the date for display
-            reminder_date = datetime.strptime(reminder_data["date"], "%Y-%m-%d").date()
-            today = datetime.now().date()
-            
-            if reminder_date == today:
-                date_display = "today"
-            elif reminder_date == today + timedelta(days=1):
-                date_display = "tomorrow"
-            else:
-                # Format as weekday, Month Day
-                date_display = reminder_date.strftime("%A, %B %d")
-            
-            # Generate user-facing response message (without JSON details)
-            response = f"I've set a reminder for {date_display} at {formatted_time}."
-            
-        else:
-            # Process regular query
-            response = assistant.generate_response(user_input)
-        
-        # Save this interaction to history
-        assistant.update_chat_history("user", user_input)
-        assistant.update_chat_history("assistant", response)
-        
-        return {
-            "response": response,
-            "is_reminder": is_reminder,
-            "reminder_data": reminder_data
-        }
+        except Exception as e:
+            error_message = f"Sorry, I couldn't save your reminder. Please try again with the details for your reminder. Error: {str(e)}"
+            return {
+                "response": error_message,
+                "is_reminder": False,
+                "reminder_data": None,
+                "status": "error"
+            }
     
-    except Exception as e:
-        error_message = f"Error processing backend query: {str(e)}"
+    def view_reminders(self) -> str:
+        """Retrieve and display all saved reminders."""
+        if not self.reminders:
+            return "No reminders found."
+        reminders_str = ["Saved Reminders:"]
+        for reminder in self.reminders:
+            reminder_date = datetime.strptime(reminder['date'], "%Y-%m-%d").date()
+            today = datetime.now().date()
+            date_display = "today" if reminder_date == today else "tomorrow" if reminder_date == today + timedelta(days=1) else reminder_date.strftime("%A, %B %d")
+            hour, minute = map(int, reminder['time'].split(':'))
+            am_pm = "AM" if hour < 12 else "PM"
+            display_hour = hour % 12 or 12
+            formatted_time = f"{display_hour}:{minute:02d} {am_pm}"
+            reminders_str.append(f"[{date_display} at {formatted_time}] {reminder['message']}")
+        return "\n".join(reminders_str)
+    
+    def process_query(self, user_input: str, conversation_history=None) -> Dict[str, Any]:
+        """Process user query and return response with house-specific filtering."""
+        if conversation_history is None:
+            conversation_history = []
+            
+        user_input_lower = user_input.lower().strip()
+        
+        # Handle special commands
+        if user_input_lower == "/view_reminders":
+            response = self.view_reminders()
+            return {"response": response, "is_reminder": True, "reminder_data": None}
+        
+        if self.is_reminder_request(user_input):
+            return self.process_reminder(user_input, conversation_history)
+        
+        # Extract house name from query
+        house_name = self.extract_house_name(user_input)
+        
+        print(f"DEBUG: Extracted house name: '{house_name}'")  # Remove this after testing
+        
+        # Query both indexes with house filtering
+        house_matches = self.query_vector_db(user_input, self.house_index, house_name)
+        guide_matches = self.query_vector_db(user_input, self.guest_guide_index, house_name)
+        
+        print(f"DEBUG: Found {len(house_matches)} house matches, {len(guide_matches)} guide matches")  # Remove after testing
+        
+        # Format contexts
+        house_context = self.format_matches(house_matches, user_input, house_name)
+        guide_context = self.format_matches(guide_matches, user_input, house_name)
+        
+        formatted_history = self.format_conversation_history(conversation_history)
+        
+        prompt = f"""
+        You are Alana, a friendly and knowledgeable AI assistant for property management employees, powered by AirBrindyGPT. Your personality is warm, confident, and resourceful - you're the colleague everyone loves to work with because you're both highly competent and genuinely supportive. You have a natural warmth in your communication style with a touch of enthusiasm that makes people feel motivated. You speak with a conversational but polished tone, occasionally using friendly phrases to make employees feel supported.
+
+        EMPLOYEE QUERY: {user_input}
+        IDENTIFIED PROPERTY: {house_name if house_name else "Not specified"}
+
+        Recent conversation:
+        {formatted_history}
+
+        **PERSONALITY TRAITS:**
+
+        1. **WARM & APPROACHABLE**:
+          You're naturally friendly and make people feel comfortable asking questions. You use warm greetings and sign-offs, and occasionally add encouraging comments.
+        2. **CONFIDENT & REASSURING**:
+          You respond with confidence that inspires trust. You're never uncertain about what you know, but you're straightforward when information is unavailable.
+        3. **EFFICIENT & PRACTICAL**:
+          You get to the point quickly with organized, actionable information. You anticipate needs and offer relevant details without being asked.
+        4. **RESOURCEFUL & KNOWLEDGEABLE**:
+          You draw on your extensive property management knowledge when specific information isn't available, providing general best practices while clearly distinguishing between document-based information and general knowledge.
+        5. **PROFESSIONALLY PERSONABLE**:
+          You strike a balance between being friendly and maintaining professionalism. You might occasionally use light humor or empathy, but always keep responses focused on work tasks.        
+        6. **ADAPTABLE COMMUNICATION STYLE**:
+          You match your tone to the context - more direct and efficient for urgent matters, warmer and more detailed for complex situations that might cause stress.
+
+        
+        **CORE INSTRUCTIONS:**
+
+        1. **Query Analysis**: Understand the employee's specific needs (property details, message drafting, communication guidance, etc.)
+
+        2. **Property Information**: 
+        - For property-related queries, extract specific details from PROPERTY INFORMATION
+        - If no property name identified, ask for clarification rather than assuming
+        - Only provide information for the specified property when identified
+        - If information unavailable, clearly state this and offer general guidance
+
+        3. **Message Drafting Guidelines**:
+        - **Tone**: Heartfelt, empathetic, professional, and genuine, Don't be too professonal keep your personality and be humble
+        - **Structure**: Acknowledgment → Empathy → Responsibility → Action → Appreciation
+        - **Content**: Address the specific issue directly, show understanding of guest frustration, take ownership where appropriate, provide clear next steps
+        - **Length**: Concise but comprehensive - cover all necessary points without being verbose
+        - **Context**: Take note of user input and MESSAGING GUIDELINES for understanding and creating the appropriate response
+        - Create the massage behalf of brindy (no need to add anything else)
+
+        4. **Message Drafting Process**:
+        - Analyze the guest's specific complaint/situation
+        - Reference MESSAGING GUIDELINES for tone and approach also for information and policy
+        - Create personalized response that:
+            * Acknowledges the guest's experience specifically
+            * Shows genuine empathy for their frustration
+            * Takes appropriate responsibility
+            * Provides clear resolution or next steps
+            * Expresses appreciation for their feedback
+        - Explain why the chosen approach works
+
+        5. **Guest Guide Integration**:
+        - Use MESSAGING GUIDELINES for communication standards
+        - Reference specific policies/procedures when relevant
+        - Maintain consistency with established communication practices
+
+        6. **Knowledge Application**:
+        - Combine document information with property management best practices
+        - Provide context and background when helpful
+        - Distinguish between specific policy information and general guidance
+
+        **RESPONSE REQUIREMENTS:**
+
+        WHATSAPP MARKDOWN FORMATTING: Format all responses to be compatible with WhatsApp's Markdown syntax for delivery in a WhatsApp inbox. Use the following conventions:
+        - Use `*text*` for bold text to highlight key points, headings, or important terms (e.g., `*Check-in Time*`).
+        - Use `_text_` for italic text to emphasize specific details or add a friendly tone (e.g., `_Happy to help!_`).
+        - Use `~text~` for strikethrough if indicating something is no longer relevant (e.g., `~Old code: 1234~`).
+        - Use triple backticks (```) for code blocks when sharing technical details like access codes or JSON data (e.g., ```Code: 1234```).
+        - Use plain text with `-` for bullet points to list information clearly (e.g., `- Item 1\n- Item 2`).
+        - Use newlines (`\n`) to separate sections or paragraphs for readability.
+        - Avoid unsupported Markdown like tables, blockquotes, or links (e.g., `[text](url)`). For links, provide the URL as plain text.
+
+        **MESSAGE DRAFTING SPECIFIC GUIDELINES:**
+
+        When drafting guest responses:
+        1. **Opening**: Thank guest for feedback/communication
+        2. **Acknowledgment**: Specifically reference their experience/concern
+        3. **Empathy**: Show understanding of their frustration/inconvenience
+        4. **Responsibility**: Take ownership where appropriate, avoid defensiveness
+        5. **Action**: Clear next steps or resolution
+        6. **Closing**: Appreciation and future commitment
+
+        - Take user input to note and organize and personalize based on that
+
+        Example structure for complaint responses:
+        - "Thank you for taking the time to share your experience..."
+        - "I understand how [specific issue] must have been [frustrating/disappointing]..."
+        - "You're absolutely right that we should have [specific action]..."
+        - "We are [taking specific action] to address this..."
+        - "Your feedback helps us improve, and we genuinely appreciate it..."
+
+        PROPERTY INFORMATION:
+        {house_context}
+
+        MESSAGING GUIDELINES:
+        {guide_context}
+
+        **IMPORTANT**: 
+            -  Only provide information that directly answers the query. Don't overwhelm with unnecessary details. If house name cannot be determined from the query, return None and ask for clarification rather than guessing.
+            - Make the conversation natural and interactive 
+            - Use Recent conversation for context of the conversation
+
+
+        """
+        
+        try:
+    
+            response = openai.ChatCompletion.create(
+                model=self.chat_model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant for property management."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=600,
+                temperature=0.7,
+                n=1,
+            )
+            answer = response.choices[0].message['content'].strip()
+        except Exception as e:
+            answer = f"Oops, something went wrong: {str(e)}. Let's try again!"
+    
         return {
-            "response": error_message,
+            "response": answer,
             "is_reminder": False,
             "reminder_data": None
         }
-
-# if __name__ == "__main__":
-#     # Load environment variables from .env file
     
-#     try:
-#         assistant = AnnaAssistant()
-#         assistant.chat()
-#     except Exception as e:
-#         print(f"Error initializing assistant: {str(e)}")
+    def chat(self):
+        """Interactive chat loop with rich Markdown rendering."""
+        welcome_message = """
+        # Welcome to Alana, Your AirBrindyGPT Assistant!
 
+        Hi there! I'm **Alana**, here to help with all things property management.  
+        - Use `/note`, `/remind`, or phrases like "remind me" to set a reminder.   
+        - Ask about properties, rules, or messaging guidelines, and I'll get you the details!  
 
+        What can I do for you today?
+        """
+        if has_rich:
+            console.print(Markdown(welcome_message))
+        else:
+            print(welcome_message)
+            print("\nTip: Install 'rich' package for better markdown rendering: pip install rich\n")
+        
+        conversation_history = []
+        
+        while True:
+            user_input = input("\nYou: ").strip()
+            if user_input.lower() == '/exit':
+                goodbye_message = "**Goodbye!** Reach out anytime you need me!"
+                if has_rich:
+                    console.print(Markdown(goodbye_message))
+                else:
+                    print(goodbye_message)
+                break
+            
+            # Add user message to history
+            conversation_history.append({"role": "user", "content": user_input})
+            
+            # Process the query
+            result = self.process_query(user_input, conversation_history)
+            
+            # Add assistant response to history
+            conversation_history.append({"role": "assistant", "content": result['response']})
+            
+            # Display the response
+            response_message = f"**Alana:** {result['response']}"
+            if has_rich:
+                console.print(Markdown(response_message))
+            else:
+                print(f"\n{response_message}")
 
-
+def process_backend_query(conversation_history, user_input: str) -> Dict[str, Any]:
+    """Process a query from the backend API, with conversation history."""
+    try:
+        assistant = AlanaAssistant()
+        return assistant.process_query(user_input, conversation_history)
+    except Exception as e:
+        return {
+            "response": f"Oops, something went wrong: {str(e)}. Let's try again!",
+            "is_reminder": False,
+            "reminder_data": None,
+            "status": "error"
+        }
 
 if __name__ == "__main__":
     # Example usage
-    sample_history = [
+    conversation_history = [
         {"role": "user", "content": "What's the check-in time for Heatherbrae 23?"},
         {"role": "assistant", "content": "The check-in time for Heatherbrae 23 is 3:00 PM. Please remember to provide the access code to guests."}
     ]
-    sample_input = "set a reminder for toay at 10.20 for the check-in time for Heatherbrae 23"
+    user_input ='''
+    give me the wifi password of the siesta pacifica
+    '''
     
     # Process the query using the backend integration function
-    response = process_backend_query(sample_history, sample_input)
+    response = process_backend_query(conversation_history, user_input)
     
-
-    print(f"Message: {response['response']}")
-    print(json.dumps(response['reminder_data'], indent=2))
-    
+    console.print(Markdown(f"Message: {response['response']}"))
+    console.print(Markdown(json.dumps(response['reminder_data'], indent=2)))
