@@ -1,7 +1,6 @@
 
 import os
 from pinecone import Pinecone
-import google.generativeai as genai
 from typing import List, Dict, Any
 from datetime import datetime, timedelta
 import re
@@ -28,8 +27,8 @@ class AlanaAssistant:
         self.OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
         # Initialize Pinecone
         self.pc = Pinecone(api_key=self.PINECONE_API_KEY)
-        self.house_index = self.pc.Index("brindy-house-test-knowladgebase")
-        self.guest_guide_index = self.pc.Index("brindy-guest-test-knowladgebase")
+        self.house_index = self.pc.Index("houseinformation-embeddings")
+        self.guest_guide_index = self.pc.Index("guest-messaging-guide-embedding")
         
         # Initialize Gemini
         # genai.configure(api_key=self.GOOGLE_API_KEY)
@@ -861,7 +860,7 @@ if __name__ == "__main__":
         {"role": "assistant", "content": "The check-in time for Heatherbrae 23 is 3:00 PM. Please remember to provide the access code to guests."}
     ]
     user_input ='''
-    Help me re write this check out message and request for a review for a guest that had a less positive experience. We had AC issues and had to re locate the guest to another unit. It all ended okay but just want to be sensitive to this before sending our normal review request.
+    whats the Smart lock details for arcadia?
     '''
     
     # Process the query using the backend integration function

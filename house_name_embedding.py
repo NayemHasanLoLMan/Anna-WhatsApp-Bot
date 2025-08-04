@@ -13,6 +13,9 @@ from pinecone import Pinecone, ServerlessSpec
 from docx import Document
 import re
 
+# Set the path to your Tesseract executable
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe" 
+
 load_dotenv()
 
 class WordVectorizerOpenAIPinecone:
@@ -356,12 +359,12 @@ class WordVectorizerOpenAIPinecone:
 # Example usage
 if __name__ == "__main__":
     vectorizer = WordVectorizerOpenAIPinecone(
-        folder_path="D:\\brindyjean\\House Notes PDF",
+        folder_path="C:\\Users\\hasan\\Downloads\\Hasan Files\\Anna-WhatsApp-Bot\\House Notes (Internal)",
         # folder_path="D:\\brindyjean\\House Notes (Internal)",  # Specify the folder containing your PDFs
-        pinecone_index_name="house-information-embeddings"
+        pinecone_index_name="houseinformation-embeddings"
     )
    
     # Example : Process a specific PDF file (replacing if it exists)
-    vectorizer.process_specific_document("HN_ Newport Beach 1, 2, 3.pdf",
-                                     house_name = "Newport Beach 1, 2, 3",
+    vectorizer.process_specific_document("HN_ Arcadia.pdf",
+                                     house_name = "Arcadia",
                                      replace_existing=True)
